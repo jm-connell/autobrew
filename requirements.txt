@@ -1,0 +1,7 @@
+# AutoBrew — Python dependencies
+# Install inside a venv:  pip install -r requirements.txt
+
+gpiozero>=2.0
+w1thermsensor>=2.3.0
+# lgpio is the recommended pin factory for Pi 5 under Bookworm
+lgpio>=0.2.2.0

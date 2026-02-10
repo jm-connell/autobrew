@@ -1,0 +1,43 @@
+# ──────────────────────────────────────────────────────────────────────
+# autobrew.service — systemd unit for AutoBrew controller
+#
+# Install:
+#   sudo cp autobrew.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable autobrew.service
+#   sudo systemctl start autobrew.service
+#
+# Logs:
+#   journalctl -u autobrew -f
+# ──────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=AutoBrew Fertilizer Brewing Controller
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+# Run as the 'pi' user (needs GPIO and display access)
+User=pi
+Group=pi
+
+# Ensure the display is available for Tkinter
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+
+# Working directory
+WorkingDirectory=/home/pi/brewer-controller
+
+# Use the project venv's Python
+ExecStart=/home/pi/brewer-controller/venv/bin/python main.py
+
+# Restart on crash (but not on clean exit)
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical.target
