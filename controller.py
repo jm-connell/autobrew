@@ -15,6 +15,7 @@ import time
 import config as CFG
 from hardware import HardwareManager
 from state_manager import new_state, save_state, clear_state
+from shared_types import Phase
 
 log = logging.getLogger("autobrew.controller")
 
@@ -40,6 +41,12 @@ class BrewController:
 
         # Manual fill-end button flag (set from UI thread)
         self._manual_end_fill = threading.Event()
+
+        # Used for async stop/join so UI never blocks
+        self._stop_join_thread: threading.Thread | None = None
+
+        # When set, user requested a manual stop (do not persist resume state)
+        self._cancel_requested = threading.Event()
 
     # ------------------------------------------------------------------
     #  Calculation helpers
@@ -80,12 +87,13 @@ class BrewController:
         self.state["brew_duration_sec"] = duration_hours * 3600
         self.state["skip_fill"] = skip_fill
         self.state["brew_start_wallclock"] = datetime.datetime.now().isoformat()
-        self.state["phase"] = "brew" if skip_fill else "fill"
+        self.state["phase"] = (Phase.BREW.value if skip_fill else Phase.FILL.value)
 
         self.hw.flow.reset()
         self.alert_msg = ""
         self._stop_event.clear()
         self._manual_end_fill.clear()
+        self._cancel_requested.clear()
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -108,11 +116,61 @@ class BrewController:
         self.alert_msg = ""
         self._stop_event.clear()
         self._manual_end_fill.clear()
+        self._cancel_requested.clear()
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         self.running = True
         log.info("Cycle RESUMED from phase '%s'", saved.get("phase"))
+
+    # ------------------------------------------------------------------
+    #  Stop control (non-blocking for UI)
+    # ------------------------------------------------------------------
+    def _safe_outputs_off_for_phase(self, phase: str | None):
+        """Turn off outputs appropriate for the current phase."""
+        if phase == Phase.FILL.value:
+            self.hw.solenoid.off()
+            self.hw.paddle.off()
+        elif phase == Phase.BREW.value:
+            self.hw.paddle.off()
+            # Solenoid should already be off during brew, but off() is harmless.
+            self.hw.solenoid.off()
+        else:
+            self.hw.solenoid.off()
+            self.hw.paddle.off()
+
+    def request_stop(self, emergency: bool = False, cancel_state: bool = True):
+        """Request the worker to stop; optionally de-energise outputs immediately."""
+        if cancel_state:
+            self._cancel_requested.set()
+        self._stop_event.set()
+
+        if emergency:
+            self.hw.emergency_stop()
+        else:
+            self._safe_outputs_off_for_phase(self.state.get("phase"))
+
+    def stop_async(self, emergency: bool = False, cancel_state: bool = True):
+        """Non-blocking stop: requests stop and joins in a helper thread."""
+        self.request_stop(emergency=emergency, cancel_state=cancel_state)
+
+        def _joiner():
+            try:
+                if self._thread and self._thread.is_alive():
+                    self._thread.join(timeout=5)
+            finally:
+                # Ensure outputs are safe
+                if emergency:
+                    self.hw.emergency_stop()
+                else:
+                    self._safe_outputs_off_for_phase(self.state.get("phase"))
+                self.running = False
+                log.info("Cycle stopped (async)")
+
+        # Only one joiner thread at a time
+        if not self._stop_join_thread or not self._stop_join_thread.is_alive():
+            self._stop_join_thread = threading.Thread(target=_joiner, daemon=True)
+            self._stop_join_thread.start()
 
     # ------------------------------------------------------------------
     #  Stop / cancel
@@ -137,23 +195,32 @@ class BrewController:
         """Main worker loop — runs in its own thread."""
         try:
             phase = self.state["phase"]
-            if phase == "fill":
+            if phase == Phase.FILL.value:
                 self._do_fill()
                 if self._stop_event.is_set():
+                    if self._cancel_requested.is_set():
+                        self.state["phase"] = Phase.STOPPED.value
+                        clear_state()
                     return
-                self.state["phase"] = "brew"
+                self.state["phase"] = Phase.BREW.value
 
-            if self.state["phase"] == "brew":
+            if self.state["phase"] == Phase.BREW.value:
                 self._do_brew()
 
+            if self._stop_event.is_set() and self._cancel_requested.is_set():
+                self.state["phase"] = Phase.STOPPED.value
+                clear_state()
+                return
+
             if not self._stop_event.is_set():
-                self.state["phase"] = "complete"
+                self.state["phase"] = Phase.COMPLETE.value
                 self.alert_msg = "Brew cycle complete!"
                 save_state(self.state)
                 log.info("Brew cycle COMPLETE")
         except Exception as exc:
             log.exception("Unhandled error in controller worker: %s", exc)
             self.alert_msg = f"ERROR: {exc}"
+            self.state["phase"] = Phase.ERROR.value
             self.hw.emergency_stop()
         finally:
             self.hw.solenoid.off()
@@ -180,16 +247,25 @@ class BrewController:
                 break
 
             # Water level veto — emergency overfill protection
-            if self.hw.level.is_full():
-                self.alert_msg = "⚠ Tank full — fill stopped (level veto)"
-                log.warning(self.alert_msg)
-                break
+            level_pct = self.hw.level.read_level_pct()
+            if level_pct is None:
+                if CFG.LEVEL_SENSOR_FAILSAFE_STOP:
+                    self.alert_msg = "⚠ Level sensor failure — fill stopped (fail-safe)"
+                    log.error(self.alert_msg)
+                    break
+            else:
+                if level_pct >= CFG.TANK_OVERFILL_PCT:
+                    self.alert_msg = "⚠ Tank full — fill stopped (level veto)"
+                    log.warning(self.alert_msg)
+                    break
 
             # Periodic state save
             now = time.monotonic()
             if now - last_save >= CFG.STATE_SAVE_INTERVAL_SEC:
                 self._update_temps()
-                save_state(self.state)
+                self.state["last_save_wallclock"] = datetime.datetime.now().isoformat()
+                if not self._cancel_requested.is_set():
+                    save_state(self.state)
                 last_save = now
 
             time.sleep(0.25)
@@ -198,7 +274,9 @@ class BrewController:
         # Final state snapshot
         self.state["added_gallons"] = round(self.hw.flow.total_gallons, 2)
         self._update_temps()
-        save_state(self.state)
+        self.state["last_save_wallclock"] = datetime.datetime.now().isoformat()
+        if not self._cancel_requested.is_set():
+            save_state(self.state)
         log.info("Fill phase ended — %.2f gal added", self.state["added_gallons"])
 
     # ------------------------------------------------------------------
@@ -242,7 +320,9 @@ class BrewController:
             # Periodic save
             if now - last_save >= CFG.STATE_SAVE_INTERVAL_SEC:
                 self._update_temps()
-                save_state(self.state)
+                self.state["last_save_wallclock"] = datetime.datetime.now().isoformat()
+                if not self._cancel_requested.is_set():
+                    save_state(self.state)
                 last_save = now
 
             time.sleep(0.5)
@@ -250,7 +330,9 @@ class BrewController:
         self.hw.paddle.off()
         self.state["brew_elapsed_sec"] = round(elapsed, 1)
         self._update_temps()
-        save_state(self.state)
+        self.state["last_save_wallclock"] = datetime.datetime.now().isoformat()
+        if not self._cancel_requested.is_set():
+            save_state(self.state)
         log.info("Brew phase ended — %.0f s elapsed", elapsed)
 
     # ------------------------------------------------------------------

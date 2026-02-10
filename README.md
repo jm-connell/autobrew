@@ -144,18 +144,24 @@ brewer-controller/
 
 ## Configuration
 
-All tuneable parameters are in `config.py`:
+Tuneable parameters are split across:
 
-| Parameter                | Default       | Description                                |
-| ------------------------ | ------------- | ------------------------------------------ |
-| `FLOW_PULSES_PER_GALLON` | 1703          | Flow meter calibration (pulses per gallon) |
-| `TANK_CAPACITY_GALLONS`  | 500           | Max working capacity of tank               |
-| `TANK_HEIGHT_CM`         | 120           | Sensor-face to tank-bottom distance        |
-| `TANK_OVERFILL_PCT`      | 95%           | Level at which fill is vetoed              |
-| `DEFAULT_DILUTION_RATIO` | 10            | lb water per lb fertilizer                 |
-| `STIR_ON_SECONDS`        | 300 (5 min)   | Stirring duration per cycle                |
-| `STIR_CYCLE_SECONDS`     | 1800 (30 min) | Total cycle period (stir + rest)           |
-| `RELAY_ACTIVE_LOW`       | True          | Set based on your relay module             |
+- `calibration.py` — wiring, flow calibration, tank geometry, relay polarity
+- `process_defaults.py` — brew defaults, timing, UI refresh and look
+
+`config.py` remains as a backward-compatible facade (`import config as CFG`).
+
+| Parameter                    | Default       | Description                                |
+| ---------------------------- | ------------- | ------------------------------------------ |
+| `FLOW_PULSES_PER_GALLON`     | 1703          | Flow meter calibration (pulses per gallon) |
+| `TANK_CAPACITY_GALLONS`      | 500           | Max working capacity of tank               |
+| `TANK_HEIGHT_CM`             | 120           | Sensor-face to tank-bottom distance        |
+| `TANK_OVERFILL_PCT`          | 95%           | Level at which fill is vetoed              |
+| `LEVEL_SENSOR_FAILSAFE_STOP` | True          | Stop fill if level read fails              |
+| `DEFAULT_DILUTION_RATIO`     | 10            | lb water per lb fertilizer                 |
+| `STIR_ON_SECONDS`            | 300 (5 min)   | Stirring duration per cycle                |
+| `STIR_CYCLE_SECONDS`         | 1800 (30 min) | Total cycle period (stir + rest)           |
+| `RELAY_ACTIVE_LOW`           | True          | Set based on your relay module             |
 
 ### Flow Meter Calibration
 

@@ -36,6 +36,7 @@ def main():
     # ── Graceful shutdown on SIGTERM / SIGINT ─────────────────────────
     def _shutdown(signum, frame):
         log.info("Signal %s received — shutting down", signum)
+        # Use synchronous stop here (service shutdown can wait briefly).
         ctrl.stop()
         hw.cleanup()
         sys.exit(0)

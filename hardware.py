@@ -219,7 +219,7 @@ class UltrasonicLevel:
         """Return True if level ≥ TANK_OVERFILL_PCT — used as fill veto."""
         pct = self.read_level_pct()
         if pct is None:
-            return False  # sensor failure → don't spuriously veto
+            return False  # controller decides fail-safe behavior
         return pct >= CFG.TANK_OVERFILL_PCT
 
     def cleanup(self):

@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 import config as CFG
+from shared_types import Phase, STATE_VERSION
 
 log = logging.getLogger("autobrew.state")
 
@@ -20,7 +21,8 @@ log = logging.getLogger("autobrew.state")
 def new_state() -> dict:
     """Return a blank/default state dictionary."""
     return {
-        "phase": "idle",               # idle | fill | brew | complete
+        "state_version": STATE_VERSION,
+        "phase": Phase.IDLE.value,      # stored as string for JSON
         "fert_weight_lb": 0.0,
         "dilution_ratio": CFG.DEFAULT_DILUTION_RATIO,
         "target_gallons": 0.0,
@@ -65,6 +67,11 @@ def load_state(path: Path = CFG.STATE_FILE) -> dict | None:
     try:
         with open(path, "r") as fh:
             data = json.load(fh)
+        # Backward-compatible defaults
+        if "state_version" not in data:
+            data["state_version"] = 0
+        if "phase" not in data:
+            data["phase"] = Phase.IDLE.value
         log.info("State loaded from %s (phase=%s)", path, data.get("phase"))
         return data
     except (json.JSONDecodeError, KeyError, TypeError) as exc:

@@ -7,7 +7,6 @@ standard  logging.getLogger("autobrew.xxx")  pattern.
 
 import logging
 import sys
-from pathlib import Path
 
 import config as CFG
 

@@ -18,6 +18,7 @@ import config as CFG
 from controller import BrewController
 from hardware import HardwareManager
 from state_manager import load_state, clear_state, new_state
+from shared_types import Phase
 
 log = logging.getLogger("autobrew.ui")
 
@@ -89,7 +90,7 @@ class BrewApp:
 
         # Decide which screen to show first
         saved = load_state()
-        if saved and saved.get("phase") in ("fill", "brew"):
+        if saved and saved.get("phase") in (Phase.FILL.value, Phase.BREW.value):
             self._show_resume_screen(saved)
         else:
             clear_state()
@@ -106,7 +107,15 @@ class BrewApp:
         self.root.mainloop()
 
     def _quit(self):
-        self.ctrl.stop()
+        # Non-blocking exit: request stop, then poll until the worker stops
+        # before cleaning up GPIO resources.
+        self.ctrl.stop_async(emergency=False, cancel_state=True)
+        self._begin_exit_poll()
+
+    def _begin_exit_poll(self):
+        if self.ctrl.running:
+            self.root.after(100, self._begin_exit_poll)
+            return
         self.hw.cleanup()
         self.root.destroy()
 
@@ -119,13 +128,26 @@ class BrewApp:
         frm.place(relx=0.5, rely=0.5, anchor="center")
 
         phase = saved.get("phase", "?")
-        if phase == "fill":
+        if phase == Phase.FILL.value:
             added = saved.get("added_gallons", 0)
             target = saved.get("target_gallons", 0)
+            last_save = saved.get("last_save_wallclock")
+
+            est_pct = self.hw.level.read_level_pct()
+            est_gal = self.hw.level.read_gallons()
+            est_line = ""
+            if est_pct is not None and est_gal is not None:
+                est_line = f"\nEstimated tank level: {est_pct:.0f}% (~{est_gal:.0f} gal)"
+
+            last_line = ""
+            if last_save:
+                last_line = f"\nLast saved: {last_save} (flow-counted: {added:.1f} gal)"
             msg = (
                 f"Previous fill incomplete.\n"
                 f"{added:.1f} of {target:.1f} gallons added.\n\n"
                 f"Resume filling?"
+                f"{est_line}"
+                f"{last_line}"
             )
         else:
             total = saved.get("brew_duration_sec", 0)
@@ -366,6 +388,12 @@ class BrewApp:
         _style_button(self._btn_new)
         self._btn_new.pack(side="left", padx=8)
 
+        self._btn_stop_cycle = tk.Button(
+            btn_frame, text="Stop Cycle", command=self._on_stop_cycle, state="disabled",
+        )
+        _style_button(self._btn_stop_cycle)
+        self._btn_stop_cycle.pack(side="left", padx=8)
+
         # Start periodic refresh
         self._refresh_monitor()
 
@@ -374,14 +402,16 @@ class BrewApp:
     # ------------------------------------------------------------------
     def _refresh_monitor(self):
         st = self.ctrl.state
-        phase = st.get("phase", "idle")
+        phase = st.get("phase") or Phase.IDLE.value
 
         # Phase
         phase_labels = {
-            "fill": "Filling",
-            "brew": "Brewing",
-            "complete": "Complete",
-            "idle": "Idle",
+            Phase.FILL.value: "Filling",
+            Phase.BREW.value: "Brewing",
+            Phase.COMPLETE.value: "Complete",
+            Phase.IDLE.value: "Idle",
+            Phase.STOPPED.value: "Stopped",
+            Phase.ERROR.value: "Error",
         }
         self._stat_labels["phase"].config(text=phase_labels.get(phase, phase))
 
@@ -404,10 +434,13 @@ class BrewApp:
         target = st.get("target_gallons", 0)
         self._stat_labels["target"].config(text=f"{target:.1f} gal")
 
-        # Water level
+        # Water level (show % and estimated gallons if available)
         level_pct = self.hw.level.read_level_pct()
-        if level_pct is not None:
-            self._stat_labels["level"].config(text=f"{level_pct:.0f} %")
+        level_gal = self.hw.level.read_gallons()
+        if level_pct is not None and level_gal is not None:
+            self._stat_labels["level"].config(text=f"{level_pct:.0f}%  (~{level_gal:.0f} gal)")
+        elif level_pct is not None:
+            self._stat_labels["level"].config(text=f"{level_pct:.0f}%")
         else:
             self._stat_labels["level"].config(text="N/A")
 
@@ -420,12 +453,12 @@ class BrewApp:
 
         # Stirring status
         stir_cyc = st.get("stir_cycle_elapsed_sec", 0)
-        if phase == "brew" and stir_cyc <= CFG.STIR_ON_SECONDS:
+        if phase == Phase.BREW.value and stir_cyc <= CFG.STIR_ON_SECONDS:
             secs_left = int(CFG.STIR_ON_SECONDS - stir_cyc)
             self._stat_labels["stir"].config(
                 text=f"ON  ({secs_left}s left)", fg=CFG.UI_OK,
             )
-        elif phase == "brew":
+        elif phase == Phase.BREW.value:
             next_stir = int(CFG.STIR_CYCLE_SECONDS - stir_cyc)
             self._stat_labels["stir"].config(
                 text=f"OFF  (next in {self._fmt_time(next_stir)})", fg=CFG.UI_FG_COLOR,
@@ -434,13 +467,13 @@ class BrewApp:
             self._stat_labels["stir"].config(text="—", fg=CFG.UI_FG_COLOR)
 
         # Progress bar
-        if phase == "fill" and target > 0:
+        if phase == Phase.FILL.value and target > 0:
             self._progress["maximum"] = target
             self._progress["value"] = min(added, target)
-        elif phase == "brew" and brew_dur > 0:
+        elif phase == Phase.BREW.value and brew_dur > 0:
             self._progress["maximum"] = brew_dur
             self._progress["value"] = min(brew_el, brew_dur)
-        elif phase == "complete":
+        elif phase == Phase.COMPLETE.value:
             self._progress["value"] = self._progress["maximum"] or 100
 
         # Alert banner
@@ -448,15 +481,18 @@ class BrewApp:
         self._lbl_alert.config(text=alert if alert else "")
 
         # Button states
-        if phase == "fill":
+        if phase == Phase.FILL.value:
             self._btn_end_fill.config(state="normal")
             self._btn_new.config(state="disabled")
-        elif phase == "complete":
+            self._btn_stop_cycle.config(state="normal")
+        elif phase == Phase.COMPLETE.value:
             self._btn_end_fill.config(state="disabled")
             self._btn_new.config(state="normal")
+            self._btn_stop_cycle.config(state="disabled")
         else:
             self._btn_end_fill.config(state="disabled")
             self._btn_new.config(state="disabled")
+            self._btn_stop_cycle.config(state=("normal" if phase == Phase.BREW.value else "disabled"))
 
         # Schedule next refresh
         self.root.after(CFG.UI_REFRESH_INTERVAL_MS, self._refresh_monitor)
@@ -476,10 +512,20 @@ class BrewApp:
         self.ctrl.manual_end_fill()
 
     def _on_emergency_stop(self):
-        self.ctrl.stop()
+        # Non-blocking so Tkinter never freezes on join
+        self.ctrl.stop_async(emergency=True)
         clear_state()
         self.ctrl.alert_msg = "Emergency stop activated. Cycle cancelled."
         self._stat_labels["phase"].config(text="STOPPED", fg=CFG.UI_WARN)
+        self._btn_new.config(state="normal")
+
+    def _on_stop_cycle(self):
+        # Normal (non-emergency) stop.
+        # If filling: closes solenoid. If brewing: stops paddle.
+        self.ctrl.stop_async(emergency=False, cancel_state=True)
+        clear_state()
+        self.ctrl.alert_msg = "Cycle stopped."
+        self.ctrl.state["phase"] = Phase.STOPPED.value
         self._btn_new.config(state="normal")
 
     def _on_new_cycle(self):
