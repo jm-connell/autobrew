@@ -100,6 +100,18 @@ class FlowMeter:
             pulses_per_gallon,
         )
 
+    @property
+    def pulses_per_gallon(self) -> int:
+        return int(self._pulses_per_gallon)
+
+    def set_pulses_per_gallon(self, pulses_per_gallon: int):
+        """Update calibration constant without resetting the counter."""
+        if pulses_per_gallon <= 0:
+            return
+        with self._lock:
+            self._pulses_per_gallon = int(pulses_per_gallon)
+        log.info("FlowMeter calibration updated: %d pulses/gal", pulses_per_gallon)
+
     def _on_pulse(self):
         with self._lock:
             self._pulse_count += 1
@@ -164,6 +176,21 @@ class UltrasonicLevel:
             self._echo = DigitalInputDevice(echo_pin)
         log.info(
             "UltrasonicLevel initialised (trigger=%d, echo=%d)", trigger_pin, echo_pin
+        )
+
+    def set_geometry(self, empty_cm: float, full_cm: float, capacity_gal: float | None = None):
+        """Update tank geometry used for % and gallon estimates."""
+        if empty_cm <= 0 or full_cm <= 0 or empty_cm <= full_cm:
+            return
+        self._empty_cm = float(empty_cm)
+        self._full_cm = float(full_cm)
+        if capacity_gal is not None and capacity_gal > 0:
+            self._capacity = float(capacity_gal)
+        log.info(
+            "Ultrasonic geometry updated: empty=%.1fcm full=%.1fcm cap=%.1fgal",
+            self._empty_cm,
+            self._full_cm,
+            self._capacity,
         )
 
     def read_distance_cm(self) -> float | None:

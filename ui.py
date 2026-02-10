@@ -19,6 +19,7 @@ from controller import BrewController
 from hardware import HardwareManager
 from state_manager import load_state, clear_state, new_state
 from shared_types import Phase
+from settings_manager import load_settings, save_settings, merge_with_defaults
 
 log = logging.getLogger("autobrew.ui")
 
@@ -89,6 +90,12 @@ class BrewApp:
         self._container.pack(fill="both", expand=True)
 
         # Decide which screen to show first
+        # If calibration hasn't been completed, force first-time setup.
+        self._settings = merge_with_defaults(load_settings())
+        if not CFG.CALIBRATION_COMPLETE or not self._settings.get("calibration_complete"):
+            self._show_calibration_screen(first_time=True)
+            return
+
         saved = load_state()
         if saved and saved.get("phase") in (Phase.FILL.value, Phase.BREW.value):
             self._show_resume_screen(saved)
@@ -258,6 +265,10 @@ class BrewApp:
         btn_start.config(bg=CFG.UI_OK, fg="#000", font=FONT_LG)
         btn_start.grid(row=5, column=0, columnspan=3, pady=20)
 
+        btn_cal = tk.Button(frm, text="Calibration / Setup", command=lambda: self._show_calibration_screen(first_time=False))
+        _style_button(btn_cal)
+        btn_cal.grid(row=6, column=0, columnspan=3, pady=(0, 10))
+
     def _update_calc(self):
         """Update the live 'calculated gallons' label."""
         try:
@@ -394,6 +405,12 @@ class BrewApp:
         _style_button(self._btn_stop_cycle)
         self._btn_stop_cycle.pack(side="left", padx=8)
 
+        self._btn_cal = tk.Button(
+            btn_frame, text="Calibration", command=lambda: self._show_calibration_screen(first_time=False), state="disabled",
+        )
+        _style_button(self._btn_cal)
+        self._btn_cal.pack(side="left", padx=8)
+
         # Start periodic refresh
         self._refresh_monitor()
 
@@ -485,14 +502,18 @@ class BrewApp:
             self._btn_end_fill.config(state="normal")
             self._btn_new.config(state="disabled")
             self._btn_stop_cycle.config(state="normal")
+            self._btn_cal.config(state="disabled")
         elif phase == Phase.COMPLETE.value:
             self._btn_end_fill.config(state="disabled")
             self._btn_new.config(state="normal")
             self._btn_stop_cycle.config(state="disabled")
+            self._btn_cal.config(state="normal")
         else:
             self._btn_end_fill.config(state="disabled")
             self._btn_new.config(state="disabled")
             self._btn_stop_cycle.config(state=("normal" if phase == Phase.BREW.value else "disabled"))
+            # Only allow calibration when not actively brewing
+            self._btn_cal.config(state=("normal" if phase in (Phase.IDLE.value, Phase.STOPPED.value) else "disabled"))
 
         # Schedule next refresh
         self.root.after(CFG.UI_REFRESH_INTERVAL_MS, self._refresh_monitor)
@@ -532,6 +553,271 @@ class BrewApp:
         clear_state()
         self.ctrl.state = new_state()
         self._show_setup_screen()
+
+    # ==================================================================
+    #  Calibration / First-Time Setup Wizard
+    # ==================================================================
+    def _show_calibration_screen(self, first_time: bool):
+        """Guided calibration process for flow meter + ultrasonic."""
+        self._clear_container()
+
+        self._settings = merge_with_defaults(load_settings())
+        self._cal_first_time = bool(first_time)
+
+        outer = tk.Frame(self._container, bg=CFG.UI_BG_COLOR)
+        outer.pack(fill="both", expand=True, padx=PAD, pady=PAD)
+
+        title_txt = "First-Time Setup" if first_time else "Calibration / Setup"
+        title = tk.Label(outer, text=title_txt)
+        _style_label(title, FONT_LG)
+        title.pack(pady=(0, 8))
+
+        desc = (
+            "This wizard calibrates sensors for THIS unit.\n"
+            "You can rerun it any time from the main screens."
+        )
+        lbl_desc = tk.Label(outer, text=desc, justify="center")
+        _style_label(lbl_desc, FONT_SM)
+        lbl_desc.pack(pady=(0, 10))
+
+        # --- Flow calibration block ---
+        flow_box = tk.Frame(outer, bg=CFG.UI_ENTRY_BG)
+        flow_box.pack(fill="x", pady=8)
+
+        lbl_flow = tk.Label(flow_box, text="Flow Meter Calibration (pulses per gallon)")
+        lbl_flow.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
+        lbl_flow.pack(anchor="w", padx=PAD, pady=(8, 0))
+
+        instructions = (
+            "1) Put discharge into a measured container or to drain.\n"
+            "2) Press 'Run Water' to open the solenoid and count pulses.\n"
+            "3) Press 'Stop Water' when done, enter ACTUAL gallons dispensed, then Save."
+        )
+        lbl_inst = tk.Label(flow_box, text=instructions, justify="left")
+        lbl_inst.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
+        lbl_inst.pack(anchor="w", padx=PAD, pady=6)
+
+        self._flow_pulses_start = 0
+        self._flow_running = False
+
+        row = tk.Frame(flow_box, bg=CFG.UI_ENTRY_BG)
+        row.pack(fill="x", padx=PAD, pady=(0, 8))
+
+        self._lbl_flow_pulses = tk.Label(row, text="Pulses: 0")
+        self._lbl_flow_pulses.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
+        self._lbl_flow_pulses.pack(side="left", padx=(0, 12))
+
+        tk.Label(row, text="Actual gallons:", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
+        self._ent_flow_actual_gal = tk.Entry(row)
+        _style_entry(self._ent_flow_actual_gal)
+        self._ent_flow_actual_gal.insert(0, "10")
+        self._ent_flow_actual_gal.pack(side="left", padx=8)
+
+        self._btn_flow_run = tk.Button(row, text="Run Water", command=self._on_flow_run)
+        _style_button(self._btn_flow_run)
+        self._btn_flow_run.pack(side="left", padx=8)
+
+        self._btn_flow_stop = tk.Button(row, text="Stop Water", command=self._on_flow_stop, state="disabled")
+        _style_button(self._btn_flow_stop)
+        self._btn_flow_stop.pack(side="left", padx=8)
+
+        self._lbl_flow_result = tk.Label(flow_box, text="")
+        self._lbl_flow_result.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_OK)
+        self._lbl_flow_result.pack(anchor="w", padx=PAD, pady=(0, 8))
+
+        # --- Ultrasonic calibration block ---
+        ultra_box = tk.Frame(outer, bg=CFG.UI_ENTRY_BG)
+        ultra_box.pack(fill="x", pady=8)
+
+        lbl_ultra = tk.Label(ultra_box, text="Ultrasonic Tank Geometry")
+        lbl_ultra.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
+        lbl_ultra.pack(anchor="w", padx=PAD, pady=(8, 0))
+
+        ultra_hint = (
+            "Tip: You do NOT have to fill the tank to calibrate. You can hold a target under the sensor\n"
+            "at the desired distance and press 'Use current as EMPTY/FULL'. A flat target (clipboard/board)\n"
+            "is more repeatable than a hand, but a hand can work in a pinch."
+        )
+        lbl_ultra_hint = tk.Label(ultra_box, text=ultra_hint, justify="left")
+        lbl_ultra_hint.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
+        lbl_ultra_hint.pack(anchor="w", padx=PAD, pady=6)
+
+        urow = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
+        urow.pack(fill="x", padx=PAD, pady=8)
+
+        tk.Label(urow, text="Empty dist (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
+        self._ent_empty_cm = tk.Entry(urow)
+        _style_entry(self._ent_empty_cm)
+        self._ent_empty_cm.insert(0, str(self._settings.get("tank_empty_distance_cm", CFG.TANK_EMPTY_DISTANCE_CM)))
+        self._ent_empty_cm.pack(side="left", padx=6)
+
+        tk.Label(urow, text="Full dist (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
+        self._ent_full_cm = tk.Entry(urow)
+        _style_entry(self._ent_full_cm)
+        self._ent_full_cm.insert(0, str(self._settings.get("tank_full_distance_cm", CFG.TANK_FULL_DISTANCE_CM)))
+        self._ent_full_cm.pack(side="left", padx=6)
+
+        tk.Label(urow, text="Capacity (gal):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
+        self._ent_capacity = tk.Entry(urow)
+        _style_entry(self._ent_capacity)
+        self._ent_capacity.insert(0, str(self._settings.get("tank_capacity_gallons", CFG.TANK_CAPACITY_GALLONS)))
+        self._ent_capacity.pack(side="left", padx=6)
+
+        btns = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
+        btns.pack(fill="x", padx=PAD, pady=(0, 8))
+
+        b_empty = tk.Button(btns, text="Use current as EMPTY", command=self._use_current_as_empty)
+        _style_button(b_empty)
+        b_empty.pack(side="left", padx=6)
+
+        b_full = tk.Button(btns, text="Use current as FULL", command=self._use_current_as_full)
+        _style_button(b_full)
+        b_full.pack(side="left", padx=6)
+
+        self._lbl_ultra_read = tk.Label(btns, text="")
+        self._lbl_ultra_read.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
+        self._lbl_ultra_read.pack(side="left", padx=10)
+
+        # --- Footer buttons ---
+        footer = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
+        footer.pack(fill="x", pady=10)
+
+        btn_save = tk.Button(footer, text="Save Calibration", command=self._save_calibration)
+        _style_button(btn_save)
+        btn_save.config(bg=CFG.UI_OK, fg="#000")
+        btn_save.pack(side="left", padx=8)
+
+        btn_cancel = tk.Button(footer, text="Cancel", command=self._cancel_calibration)
+        _style_button(btn_cancel)
+        btn_cancel.pack(side="left", padx=8)
+
+        # start pulse refresh
+        self._refresh_cal_pulses()
+
+    def _refresh_cal_pulses(self):
+        if not hasattr(self, "_lbl_flow_pulses"):
+            return
+        if self._flow_running:
+            pulses_now = self.hw.flow.pulse_count - self._flow_pulses_start
+            self._lbl_flow_pulses.config(text=f"Pulses: {pulses_now}")
+        self.root.after(250, self._refresh_cal_pulses)
+
+    def _on_flow_run(self):
+        # Safety: do not allow this while a brew cycle is running
+        if self.ctrl.running and self.ctrl.state.get("phase") in (Phase.FILL.value, Phase.BREW.value):
+            messagebox.showwarning("Busy", "Stop the current cycle before calibrating.")
+            return
+        self.hw.flow.reset()
+        self._flow_pulses_start = 0
+        self._flow_running = True
+        self._lbl_flow_result.config(text="")
+        self.hw.solenoid.on()
+        self._btn_flow_run.config(state="disabled")
+        self._btn_flow_stop.config(state="normal")
+
+    def _on_flow_stop(self):
+        self.hw.solenoid.off()
+        self._flow_running = False
+        self._btn_flow_run.config(state="normal")
+        self._btn_flow_stop.config(state="disabled")
+
+        pulses = self.hw.flow.pulse_count
+        try:
+            actual_gal = float(self._ent_flow_actual_gal.get())
+            if actual_gal <= 0:
+                raise ValueError
+        except ValueError:
+            self._lbl_flow_result.config(text="Enter a valid ACTUAL gallons value.", fg=CFG.UI_WARN)
+            return
+        ppg = int(round(pulses / actual_gal))
+        self._lbl_flow_result.config(text=f"Computed calibration: {ppg} pulses/gal", fg=CFG.UI_OK)
+        self._settings["flow_pulses_per_gallon"] = ppg
+
+    def _use_current_as_empty(self):
+        dist = self.hw.level.read_distance_cm()
+        if dist is None:
+            self._lbl_ultra_read.config(text="No reading", fg=CFG.UI_WARN)
+            return
+        self._ent_empty_cm.delete(0, tk.END)
+        self._ent_empty_cm.insert(0, f"{dist:.1f}")
+        self._lbl_ultra_read.config(text=f"Current: {dist:.1f} cm", fg=CFG.UI_ACCENT)
+
+    def _use_current_as_full(self):
+        dist = self.hw.level.read_distance_cm()
+        if dist is None:
+            self._lbl_ultra_read.config(text="No reading", fg=CFG.UI_WARN)
+            return
+        self._ent_full_cm.delete(0, tk.END)
+        self._ent_full_cm.insert(0, f"{dist:.1f}")
+        self._lbl_ultra_read.config(text=f"Current: {dist:.1f} cm", fg=CFG.UI_ACCENT)
+
+    def _save_calibration(self):
+        # Validate + persist
+        try:
+            ppg = int(self._settings.get("flow_pulses_per_gallon", CFG.FLOW_PULSES_PER_GALLON))
+            empty_cm = float(self._ent_empty_cm.get())
+            full_cm = float(self._ent_full_cm.get())
+            cap = float(self._ent_capacity.get())
+        except ValueError:
+            messagebox.showerror("Calibration", "Please enter valid numbers.")
+            return
+
+        if ppg <= 0:
+            messagebox.showerror("Calibration", "Flow calibration must be > 0.")
+            return
+        if empty_cm <= full_cm:
+            messagebox.showerror("Calibration", "Empty distance must be greater than full distance.")
+            return
+
+        self._settings["flow_pulses_per_gallon"] = ppg
+        self._settings["tank_empty_distance_cm"] = empty_cm
+        self._settings["tank_full_distance_cm"] = full_cm
+        self._settings["tank_capacity_gallons"] = cap
+        self._settings["calibration_complete"] = True
+
+        if not save_settings(self._settings):
+            messagebox.showerror("Calibration", "Could not save settings file.")
+            return
+
+        # Apply to runtime config + hardware instances
+        CFG.apply_runtime_settings(self._settings)
+        self.hw.flow.set_pulses_per_gallon(ppg)
+        self.hw.level.set_geometry(empty_cm, full_cm, cap)
+
+        messagebox.showinfo("Calibration", "Calibration saved.")
+
+        # Return to main flow
+        if self._cal_first_time:
+            saved = load_state()
+            if saved and saved.get("phase") in (Phase.FILL.value, Phase.BREW.value):
+                self._show_resume_screen(saved)
+            else:
+                self._show_setup_screen()
+        else:
+            # If we came from monitor, go back there if a cycle is active; otherwise setup
+            if self.ctrl.running:
+                self._show_monitor_screen()
+            else:
+                self._show_setup_screen()
+
+    def _cancel_calibration(self):
+        # Ensure solenoid is closed if user cancels mid-flow
+        try:
+            self.hw.solenoid.off()
+        except Exception:
+            pass
+
+        if self._cal_first_time:
+            messagebox.showwarning(
+                "Setup Required",
+                "Calibration is required before using the system.",
+            )
+            self._show_calibration_screen(first_time=True)
+        else:
+            if self.ctrl.running:
+                self._show_monitor_screen()
+            else:
+                self._show_setup_screen()
 
     # ------------------------------------------------------------------
     #  Utilities

@@ -129,10 +129,13 @@ journalctl -u autobrew -f
 ```
 brewer-controller/
 ├── main.py              # Entry point
-├── config.py            # All constants, GPIO pins, calibration values
+├── config.py            # Backward-compatible config facade (imports defaults + calibration + settings)
+├── calibration.py       # Wiring + calibration constants (defaults)
+├── process_defaults.py  # Brew/UI defaults
 ├── hardware.py          # GPIO / sensor abstraction layer
 ├── controller.py        # Brew-cycle state machine (fill → brew → complete)
 ├── state_manager.py     # JSON state persistence for power-loss recovery
+├── settings_manager.py  # Persistent per-unit calibration settings (settings.json)
 ├── ui.py                # Tkinter touchscreen GUI
 ├── logger_setup.py      # Centralised logging
 ├── requirements.txt     # Python dependencies
@@ -151,6 +154,9 @@ Tuneable parameters are split across:
 
 `config.py` remains as a backward-compatible facade (`import config as CFG`).
 
+Per-unit calibration is stored in `/home/pi/brewer-controller/settings.json` and loaded automatically at startup.
+If calibration has not been completed, the UI will force a first-time setup wizard.
+
 | Parameter                    | Default       | Description                                |
 | ---------------------------- | ------------- | ------------------------------------------ |
 | `FLOW_PULSES_PER_GALLON`     | 1703          | Flow meter calibration (pulses per gallon) |
@@ -163,16 +169,38 @@ Tuneable parameters are split across:
 | `STIR_CYCLE_SECONDS`         | 1800 (30 min) | Total cycle period (stir + rest)           |
 | `RELAY_ACTIVE_LOW`           | True          | Set based on your relay module             |
 
-### Flow Meter Calibration
+## Calibration (Recommended)
 
-To calibrate, run a known volume of water through the meter and count
-pulses. Update `FLOW_PULSES_PER_GALLON` in `config.py`.
+Use the built-in **Calibration / Setup** wizard (available on the setup screen and monitor screen).
+It writes per-unit values to `/home/pi/brewer-controller/settings.json` and applies them immediately.
 
-### Tank Geometry (Ultrasonic Sensor)
+### Flow meter (pulses/gal)
 
-Mount the JSN-SR04T at the top of the tank pointing straight down.
-Measure and set `TANK_EMPTY_DISTANCE_CM` and `TANK_FULL_DISTANCE_CM`.
-The system uses linear interpolation to estimate fill percentage.
+- Put the solenoid discharge into a measured container (or to drain if you can measure volume another way).
+- In the wizard, tap **Run Water** to open the solenoid and count pulses.
+- Tap **Stop Water**, enter the **actual gallons** dispensed, then **Save Calibration**.
+
+Practical tip: using 10–20 gallons usually gives a more stable calibration than 1–2 gallons.
+
+### Ultrasonic tank geometry (EMPTY/FULL distances)
+
+The ultrasonic sensor measures the distance from the sensor face to the **liquid surface**.
+The system uses two distances:
+
+- **Empty distance (cm)** — distance when the tank is considered 0%
+- **Full distance (cm)** — distance at your desired “full” working level
+
+You do **not** have to actually fill the tank to calibrate these.
+
+Accepted calibration methods:
+
+- **Best / most repeatable:** hold a **flat target** (clipboard/board/cardboard) under the sensor at the
+  desired distance and tap **Use current as EMPTY/FULL**.
+- **Works in a pinch:** hold your **hand** under the sensor and tap **Use current as EMPTY/FULL**.
+  (Hands are not perfectly flat, so readings can vary more.)
+- **Most accurate:** measure the distances with a tape measure and type them into the fields.
+
+If you _do_ prefer filling the tank: fill to your intended working “full” level, then tap **Use current as FULL**.
 
 ---
 
