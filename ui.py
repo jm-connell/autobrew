@@ -26,11 +26,63 @@ log = logging.getLogger("autobrew.ui")
 # ──────────────────────────────────────────────────────────────────────
 # Styling helpers
 # ──────────────────────────────────────────────────────────────────────
+UI_SCALE = 1.0
+UI_WIDTH = int(getattr(CFG, "UI_BASE_WIDTH", 800))
+UI_HEIGHT = int(getattr(CFG, "UI_BASE_HEIGHT", 480))
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _px(value: float) -> int:
+    """Scale a pixel value relative to the baseline 800×480 design."""
+    return max(1, int(round(float(value) * float(UI_SCALE))))
+
+
+def _content_width() -> int:
+    # Conservative content width used for wraplength/progress sizing.
+    # Keeps UI readable even if the window is slightly smaller.
+    return max(240, int(UI_WIDTH - _px(2 * 10) - _px(40)))
+
+
+def _wraplength(frac: float = 0.90, cap_px: int | None = None) -> int:
+    w = int(_content_width() * float(frac))
+    if cap_px is not None:
+        w = min(w, _px(cap_px))
+    return max(200, w)
+
+
+def _apply_ui_metrics(width: int, height: int):
+    """Compute UI scale + derived fonts/padding for the current display."""
+    global UI_SCALE, UI_WIDTH, UI_HEIGHT
+    global FONT_LG, FONT_MD, FONT_SM, FONT_STAT, FONT_ICON, PAD
+
+    base_w = int(getattr(CFG, "UI_BASE_WIDTH", 800))
+    base_h = int(getattr(CFG, "UI_BASE_HEIGHT", 480))
+    min_scale = float(getattr(CFG, "UI_SCALE_MIN", 0.85))
+    max_scale = float(getattr(CFG, "UI_SCALE_MAX", 1.40))
+
+    UI_WIDTH = int(width) if width else base_w
+    UI_HEIGHT = int(height) if height else base_h
+
+    scale = min(UI_WIDTH / base_w, UI_HEIGHT / base_h)
+    UI_SCALE = _clamp(scale, min_scale, max_scale)
+
+    FONT_LG = (CFG.UI_FONT_FAMILY, _px(20), "bold")
+    FONT_MD = (CFG.UI_FONT_FAMILY, _px(16))
+    FONT_SM = (CFG.UI_FONT_FAMILY, _px(13))
+    FONT_STAT = (CFG.UI_FONT_FAMILY, _px(28), "bold")
+    FONT_ICON = (CFG.UI_FONT_FAMILY, _px(18), "bold")
+    PAD = _px(10)
+
+
+# Defaults (overridden at runtime once the root window exists)
 FONT_LG = (CFG.UI_FONT_FAMILY, 20, "bold")
 FONT_MD = (CFG.UI_FONT_FAMILY, 16)
 FONT_SM = (CFG.UI_FONT_FAMILY, 13)
 FONT_STAT = (CFG.UI_FONT_FAMILY, 28, "bold")
-
+FONT_ICON = (CFG.UI_FONT_FAMILY, 18, "bold")
 PAD = 10
 
 
@@ -42,8 +94,8 @@ def _style_button(btn: tk.Button):
         activebackground=CFG.UI_ACCENT,
         activeforeground="#000",
         relief="flat",
-        padx=18,
-        pady=10,
+        padx=_px(18),
+        pady=_px(10),
         cursor="hand2",
     )
 
@@ -77,11 +129,28 @@ class BrewApp:
         self.root.title("AutoBrew Controller")
         self.root.configure(bg=CFG.UI_BG_COLOR)
 
-        # Full-screen on Pi; windowed 800×480 elsewhere
-        try:
-            self.root.attributes("-fullscreen", True)
-        except tk.TclError:
-            self.root.geometry("800x480")
+        # Full-screen on Pi; windowed elsewhere (avoid giant scaling on dev desktops)
+        from hardware import ON_PI
+        fullscreen_on_pi = bool(getattr(CFG, "UI_FULLSCREEN_ON_PI", True))
+        windowed_geometry = str(getattr(CFG, "UI_WINDOWED_GEOMETRY", "800x480"))
+        use_fullscreen = bool(ON_PI and fullscreen_on_pi)
+
+        if use_fullscreen:
+            try:
+                self.root.attributes("-fullscreen", True)
+            except tk.TclError:
+                use_fullscreen = False
+
+        if not use_fullscreen:
+            self.root.geometry(windowed_geometry)
+
+        # Derive scale/fonts/padding from the active display/window size
+        self.root.update_idletasks()
+        if use_fullscreen:
+            w, h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        else:
+            w, h = self.root.winfo_width(), self.root.winfo_height()
+        _apply_ui_metrics(w, h)
 
         self.root.bind("<Escape>", lambda e: self._quit())
 
@@ -168,20 +237,20 @@ class BrewApp:
 
         lbl = tk.Label(frm, text=msg, justify="center")
         _style_label(lbl, FONT_LG)
-        lbl.pack(pady=20)
+        lbl.pack(pady=_px(20))
 
         btn_frame = tk.Frame(frm, bg=CFG.UI_BG_COLOR)
-        btn_frame.pack(pady=10)
+        btn_frame.pack(pady=_px(10))
 
         btn_yes = tk.Button(btn_frame, text="Yes — Resume", command=lambda: self._resume(saved))
         _style_button(btn_yes)
         btn_yes.config(bg=CFG.UI_OK, fg="#000")
-        btn_yes.pack(side="left", padx=10)
+        btn_yes.pack(side="left", padx=_px(10))
 
         btn_no = tk.Button(btn_frame, text="No — New Cycle", command=self._decline_resume)
         _style_button(btn_no)
         btn_no.config(bg=CFG.UI_WARN, fg="#000")
-        btn_no.pack(side="left", padx=10)
+        btn_no.pack(side="left", padx=_px(10))
 
     def _resume(self, saved: dict):
         self.ctrl.resume_cycle(saved)
@@ -202,27 +271,27 @@ class BrewApp:
         # Title
         title = tk.Label(frm, text="New Brew Cycle")
         _style_label(title, FONT_LG)
-        title.grid(row=0, column=0, columnspan=3, pady=(0, 20))
+        title.grid(row=0, column=0, columnspan=3, pady=(0, _px(20)))
 
         # --- Fertilizer weight ---
         lbl_fw = tk.Label(frm, text="Fertilizer (lb):")
         _style_label(lbl_fw)
-        lbl_fw.grid(row=1, column=0, sticky="e", padx=PAD, pady=6)
+        lbl_fw.grid(row=1, column=0, sticky="e", padx=PAD, pady=_px(6))
 
         self._ent_fert = tk.Entry(frm)
         _style_entry(self._ent_fert)
         self._ent_fert.insert(0, "50")
-        self._ent_fert.grid(row=1, column=1, padx=PAD, pady=6)
+        self._ent_fert.grid(row=1, column=1, padx=PAD, pady=_px(6))
 
         # --- Dilution ratio ---
         lbl_dr = tk.Label(frm, text="Dilution (lb water / lb fert):")
         _style_label(lbl_dr)
-        lbl_dr.grid(row=2, column=0, sticky="e", padx=PAD, pady=6)
+        lbl_dr.grid(row=2, column=0, sticky="e", padx=PAD, pady=_px(6))
 
         self._ent_dilution = tk.Entry(frm)
         _style_entry(self._ent_dilution)
         self._ent_dilution.insert(0, str(CFG.DEFAULT_DILUTION_RATIO))
-        self._ent_dilution.grid(row=2, column=1, padx=PAD, pady=6)
+        self._ent_dilution.grid(row=2, column=1, padx=PAD, pady=_px(6))
 
         # Calculated gallons indicator
         self._lbl_calc_gal = tk.Label(frm, text="")
@@ -237,12 +306,12 @@ class BrewApp:
         # --- Brew duration ---
         lbl_dur = tk.Label(frm, text="Brew Duration (hours):")
         _style_label(lbl_dur)
-        lbl_dur.grid(row=3, column=0, sticky="e", padx=PAD, pady=6)
+        lbl_dur.grid(row=3, column=0, sticky="e", padx=PAD, pady=_px(6))
 
         self._ent_duration = tk.Entry(frm)
         _style_entry(self._ent_duration)
         self._ent_duration.insert(0, "24")
-        self._ent_duration.grid(row=3, column=1, padx=PAD, pady=6)
+        self._ent_duration.grid(row=3, column=1, padx=PAD, pady=_px(6))
 
         # --- Skip fill checkbox ---
         self._skip_fill_var = tk.IntVar(value=0)
@@ -257,17 +326,17 @@ class BrewApp:
             activeforeground=CFG.UI_FG_COLOR,
             font=FONT_SM,
         )
-        chk.grid(row=4, column=0, columnspan=3, pady=10)
+        chk.grid(row=4, column=0, columnspan=3, pady=_px(10))
 
         # --- Start button ---
         btn_start = tk.Button(frm, text="▶  Start Brew", command=self._on_start)
         _style_button(btn_start)
         btn_start.config(bg=CFG.UI_OK, fg="#000", font=FONT_LG)
-        btn_start.grid(row=5, column=0, columnspan=3, pady=20)
+        btn_start.grid(row=5, column=0, columnspan=3, pady=_px(20))
 
         btn_cal = tk.Button(frm, text="Calibration / Setup", command=lambda: self._show_calibration_screen(first_time=False))
         _style_button(btn_cal)
-        btn_cal.grid(row=6, column=0, columnspan=3, pady=(0, 10))
+        btn_cal.grid(row=6, column=0, columnspan=3, pady=(0, _px(10)))
 
     def _update_calc(self):
         """Update the live 'calculated gallons' label."""
@@ -322,7 +391,7 @@ class BrewApp:
         # --- Header ---
         hdr = tk.Label(outer, text="AutoBrew — Live Status")
         _style_label(hdr, FONT_LG)
-        hdr.pack(pady=(0, 8))
+        hdr.pack(pady=(0, _px(8)))
 
         # --- Alert banner ---
         self._lbl_alert = tk.Label(outer, text="", fg=CFG.UI_WARN)
@@ -331,7 +400,7 @@ class BrewApp:
 
         # --- Stats grid ---
         grid = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
-        grid.pack(fill="both", expand=True, pady=5)
+        grid.pack(fill="both", expand=True, pady=_px(5))
 
         self._stat_labels: dict[str, tk.Label] = {}
         stat_defs = [
@@ -349,12 +418,12 @@ class BrewApp:
             row, col = divmod(i, 2)  # 2-column layout
             lbl_name = tk.Label(grid, text=display, anchor="e")
             _style_label(lbl_name, FONT_SM)
-            lbl_name.grid(row=row, column=col * 2, sticky="e", padx=(15, 5), pady=6)
+            lbl_name.grid(row=row, column=col * 2, sticky="e", padx=(_px(15), _px(5)), pady=_px(6))
 
             lbl_val = tk.Label(grid, text="—", anchor="w")
             _style_label(lbl_val, FONT_MD)
             lbl_val.config(fg=CFG.UI_ACCENT)
-            lbl_val.grid(row=row, column=col * 2 + 1, sticky="w", padx=(0, 15), pady=6)
+            lbl_val.grid(row=row, column=col * 2 + 1, sticky="w", padx=(0, _px(15)), pady=_px(6))
             self._stat_labels[key] = lbl_val
 
         # Even column weights
@@ -368,48 +437,48 @@ class BrewApp:
             "brew.Horizontal.TProgressbar",
             troughcolor=CFG.UI_ENTRY_BG,
             background=CFG.UI_ACCENT,
-            thickness=22,
+            thickness=_px(22),
         )
         self._progress = ttk.Progressbar(
-            outer, orient="horizontal", length=700,
+            outer, orient="horizontal", length=int(_content_width() * 0.92),
             mode="determinate", style="brew.Horizontal.TProgressbar",
         )
-        self._progress.pack(pady=8)
+        self._progress.pack(pady=_px(8))
 
         # --- Button row ---
         btn_frame = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
-        btn_frame.pack(pady=6)
+        btn_frame.pack(pady=_px(6))
 
         self._btn_end_fill = tk.Button(
             btn_frame, text="End Fill Now", command=self._on_end_fill,
         )
         _style_button(self._btn_end_fill)
-        self._btn_end_fill.pack(side="left", padx=8)
+        self._btn_end_fill.pack(side="left", padx=_px(8))
 
         btn_stop = tk.Button(
             btn_frame, text="⛔  Emergency Stop", command=self._on_emergency_stop,
         )
         _style_button(btn_stop)
         btn_stop.config(bg=CFG.UI_WARN, fg="#000")
-        btn_stop.pack(side="left", padx=8)
+        btn_stop.pack(side="left", padx=_px(8))
 
         self._btn_new = tk.Button(
             btn_frame, text="New Cycle", command=self._on_new_cycle, state="disabled",
         )
         _style_button(self._btn_new)
-        self._btn_new.pack(side="left", padx=8)
+        self._btn_new.pack(side="left", padx=_px(8))
 
         self._btn_stop_cycle = tk.Button(
             btn_frame, text="Stop Cycle", command=self._on_stop_cycle, state="disabled",
         )
         _style_button(self._btn_stop_cycle)
-        self._btn_stop_cycle.pack(side="left", padx=8)
+        self._btn_stop_cycle.pack(side="left", padx=_px(8))
 
         self._btn_cal = tk.Button(
             btn_frame, text="Calibration", command=lambda: self._show_calibration_screen(first_time=False), state="disabled",
         )
         _style_button(self._btn_cal)
-        self._btn_cal.pack(side="left", padx=8)
+        self._btn_cal.pack(side="left", padx=_px(8))
 
         # Start periodic refresh
         self._refresh_monitor()
@@ -567,7 +636,7 @@ class BrewApp:
 
         title = tk.Label(outer, text="Hardware Check")
         _style_label(title, FONT_LG)
-        title.pack(pady=(0, 4))
+        title.pack(pady=(0, _px(4)))
 
         desc = tk.Label(
             outer,
@@ -576,29 +645,29 @@ class BrewApp:
             justify="center",
         )
         _style_label(desc, FONT_SM)
-        desc.pack(pady=(0, 6))
+        desc.pack(pady=(0, _px(6)))
 
         # Summary line (updated after checks run)
         self._hc_summary = tk.Label(outer, text="")
         _style_label(self._hc_summary, FONT_MD)
-        self._hc_summary.pack(pady=(0, 4))
+        self._hc_summary.pack(pady=(0, _px(4)))
 
         # Footer buttons — pack bottom-first so they stay visible
         footer = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
-        footer.pack(side="bottom", fill="x", pady=6)
+        footer.pack(side="bottom", fill="x", pady=_px(6))
 
         btn_recheck = tk.Button(
             footer, text="\u27F3  Recheck All", command=self._hc_recheck,
         )
         _style_button(btn_recheck)
-        btn_recheck.pack(side="left", padx=8)
+        btn_recheck.pack(side="left", padx=_px(8))
 
         btn_continue = tk.Button(
             footer, text="Continue  \u2192", command=self._hc_continue,
         )
         _style_button(btn_continue)
         btn_continue.config(bg=CFG.UI_OK, fg="#000")
-        btn_continue.pack(side="right", padx=8)
+        btn_continue.pack(side="right", padx=_px(8))
 
         # Scrollable device list area
         list_container = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
@@ -663,21 +732,21 @@ class BrewApp:
         detected = result.detected
 
         row = tk.Frame(self._hc_list_frame, bg=CFG.UI_ENTRY_BG)
-        row.pack(fill="x", pady=3, padx=4)
+        row.pack(fill="x", pady=_px(3), padx=_px(4))
 
         # Header: icon + name + pin badge
         header = tk.Frame(row, bg=CFG.UI_ENTRY_BG)
-        header.pack(fill="x", padx=8, pady=(6, 0))
+        header.pack(fill="x", padx=_px(8), pady=(_px(6), 0))
 
         icon_text = "\u2713" if detected else "\u2717"
         icon_color = CFG.UI_OK if detected else CFG.UI_WARN
 
         lbl_icon = tk.Label(
             header, text=icon_text,
-            font=(CFG.UI_FONT_FAMILY, 18, "bold"),
+            font=FONT_ICON,
             fg=icon_color, bg=CFG.UI_ENTRY_BG,
         )
-        lbl_icon.pack(side="left", padx=(0, 8))
+        lbl_icon.pack(side="left", padx=(0, _px(8)))
 
         lbl_name = tk.Label(
             header, text=dev.name, font=FONT_MD,
@@ -701,9 +770,9 @@ class BrewApp:
         lbl_detail = tk.Label(
             detail_frame, text=detail_text, font=FONT_SM,
             fg=CFG.UI_FG_COLOR, bg=CFG.UI_ENTRY_BG,
-            justify="left", wraplength=650, anchor="w",
+            justify="left", wraplength=_wraplength(frac=0.92, cap_px=650), anchor="w",
         )
-        lbl_detail.pack(fill="x", padx=(36, 8), pady=(2, 6))
+        lbl_detail.pack(fill="x", padx=(_px(36), _px(8)), pady=(_px(2), _px(6)))
 
         # Not-detected → expanded by default; detected → collapsed
         if not detected:
@@ -739,7 +808,7 @@ class BrewApp:
         title_txt = "First-Time Setup" if first_time else "Calibration / Setup"
         title = tk.Label(outer, text=title_txt)
         _style_label(title, FONT_LG)
-        title.pack(pady=(0, 8))
+        title.pack(pady=(0, _px(8)))
 
         desc = (
             "This wizard calibrates sensors for THIS unit.\n"
@@ -747,15 +816,15 @@ class BrewApp:
         )
         lbl_desc = tk.Label(outer, text=desc, justify="center")
         _style_label(lbl_desc, FONT_SM)
-        lbl_desc.pack(pady=(0, 10))
+        lbl_desc.pack(pady=(0, _px(10)))
 
         # --- Flow calibration block ---
         flow_box = tk.Frame(outer, bg=CFG.UI_ENTRY_BG)
-        flow_box.pack(fill="x", pady=8)
+        flow_box.pack(fill="x", pady=_px(8))
 
         lbl_flow = tk.Label(flow_box, text="Flow Meter Calibration (pulses per gallon)")
         lbl_flow.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_flow.pack(anchor="w", padx=PAD, pady=(8, 0))
+        lbl_flow.pack(anchor="w", padx=PAD, pady=(_px(8), 0))
 
         instructions = (
             "1) Put discharge into a measured container or to drain.\n"
@@ -764,43 +833,43 @@ class BrewApp:
         )
         lbl_inst = tk.Label(flow_box, text=instructions, justify="left")
         lbl_inst.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_inst.pack(anchor="w", padx=PAD, pady=6)
+        lbl_inst.pack(anchor="w", padx=PAD, pady=_px(6))
 
         self._flow_pulses_start = 0
         self._flow_running = False
 
         row = tk.Frame(flow_box, bg=CFG.UI_ENTRY_BG)
-        row.pack(fill="x", padx=PAD, pady=(0, 8))
+        row.pack(fill="x", padx=PAD, pady=(0, _px(8)))
 
         self._lbl_flow_pulses = tk.Label(row, text="Pulses: 0")
         self._lbl_flow_pulses.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
-        self._lbl_flow_pulses.pack(side="left", padx=(0, 12))
+        self._lbl_flow_pulses.pack(side="left", padx=(0, _px(12)))
 
         tk.Label(row, text="Actual gallons:", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
         self._ent_flow_actual_gal = tk.Entry(row)
         _style_entry(self._ent_flow_actual_gal)
         self._ent_flow_actual_gal.insert(0, "10")
-        self._ent_flow_actual_gal.pack(side="left", padx=8)
+        self._ent_flow_actual_gal.pack(side="left", padx=_px(8))
 
         self._btn_flow_run = tk.Button(row, text="Run Water", command=self._on_flow_run)
         _style_button(self._btn_flow_run)
-        self._btn_flow_run.pack(side="left", padx=8)
+        self._btn_flow_run.pack(side="left", padx=_px(8))
 
         self._btn_flow_stop = tk.Button(row, text="Stop Water", command=self._on_flow_stop, state="disabled")
         _style_button(self._btn_flow_stop)
-        self._btn_flow_stop.pack(side="left", padx=8)
+        self._btn_flow_stop.pack(side="left", padx=_px(8))
 
         self._lbl_flow_result = tk.Label(flow_box, text="")
         self._lbl_flow_result.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_OK)
-        self._lbl_flow_result.pack(anchor="w", padx=PAD, pady=(0, 8))
+        self._lbl_flow_result.pack(anchor="w", padx=PAD, pady=(0, _px(8)))
 
         # --- Ultrasonic calibration block ---
         ultra_box = tk.Frame(outer, bg=CFG.UI_ENTRY_BG)
-        ultra_box.pack(fill="x", pady=8)
+        ultra_box.pack(fill="x", pady=_px(8))
 
         lbl_ultra = tk.Label(ultra_box, text="Ultrasonic Tank Geometry")
         lbl_ultra.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_ultra.pack(anchor="w", padx=PAD, pady=(8, 0))
+        lbl_ultra.pack(anchor="w", padx=PAD, pady=(_px(8), 0))
 
         ultra_hint = (
             "Tip: You do NOT have to fill the tank to calibrate. You can hold a target under the sensor\n"
@@ -809,56 +878,56 @@ class BrewApp:
         )
         lbl_ultra_hint = tk.Label(ultra_box, text=ultra_hint, justify="left")
         lbl_ultra_hint.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_ultra_hint.pack(anchor="w", padx=PAD, pady=6)
+        lbl_ultra_hint.pack(anchor="w", padx=PAD, pady=_px(6))
 
         urow = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
-        urow.pack(fill="x", padx=PAD, pady=8)
+        urow.pack(fill="x", padx=PAD, pady=_px(8))
 
         tk.Label(urow, text="Empty dist (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
         self._ent_empty_cm = tk.Entry(urow)
         _style_entry(self._ent_empty_cm)
         self._ent_empty_cm.insert(0, str(self._settings.get("tank_empty_distance_cm", CFG.TANK_EMPTY_DISTANCE_CM)))
-        self._ent_empty_cm.pack(side="left", padx=6)
+        self._ent_empty_cm.pack(side="left", padx=_px(6))
 
         tk.Label(urow, text="Full dist (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
         self._ent_full_cm = tk.Entry(urow)
         _style_entry(self._ent_full_cm)
         self._ent_full_cm.insert(0, str(self._settings.get("tank_full_distance_cm", CFG.TANK_FULL_DISTANCE_CM)))
-        self._ent_full_cm.pack(side="left", padx=6)
+        self._ent_full_cm.pack(side="left", padx=_px(6))
 
         tk.Label(urow, text="Capacity (gal):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
         self._ent_capacity = tk.Entry(urow)
         _style_entry(self._ent_capacity)
         self._ent_capacity.insert(0, str(self._settings.get("tank_capacity_gallons", CFG.TANK_CAPACITY_GALLONS)))
-        self._ent_capacity.pack(side="left", padx=6)
+        self._ent_capacity.pack(side="left", padx=_px(6))
 
         btns = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
-        btns.pack(fill="x", padx=PAD, pady=(0, 8))
+        btns.pack(fill="x", padx=PAD, pady=(0, _px(8)))
 
         b_empty = tk.Button(btns, text="Use current as EMPTY", command=self._use_current_as_empty)
         _style_button(b_empty)
-        b_empty.pack(side="left", padx=6)
+        b_empty.pack(side="left", padx=_px(6))
 
         b_full = tk.Button(btns, text="Use current as FULL", command=self._use_current_as_full)
         _style_button(b_full)
-        b_full.pack(side="left", padx=6)
+        b_full.pack(side="left", padx=_px(6))
 
         self._lbl_ultra_read = tk.Label(btns, text="")
         self._lbl_ultra_read.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
-        self._lbl_ultra_read.pack(side="left", padx=10)
+        self._lbl_ultra_read.pack(side="left", padx=_px(10))
 
         # --- Footer buttons ---
         footer = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
-        footer.pack(fill="x", pady=10)
+        footer.pack(fill="x", pady=_px(10))
 
         btn_save = tk.Button(footer, text="Save Calibration", command=self._save_calibration)
         _style_button(btn_save)
         btn_save.config(bg=CFG.UI_OK, fg="#000")
-        btn_save.pack(side="left", padx=8)
+        btn_save.pack(side="left", padx=_px(8))
 
         btn_cancel = tk.Button(footer, text="Cancel", command=self._cancel_calibration)
         _style_button(btn_cancel)
-        btn_cancel.pack(side="left", padx=8)
+        btn_cancel.pack(side="left", padx=_px(8))
 
         btn_hw = tk.Button(
             footer, text="Hardware Check",
@@ -867,7 +936,7 @@ class BrewApp:
             ),
         )
         _style_button(btn_hw)
-        btn_hw.pack(side="right", padx=8)
+        btn_hw.pack(side="right", padx=_px(8))
 
         # start pulse refresh
         self._refresh_cal_pulses()
