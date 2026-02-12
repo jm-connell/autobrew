@@ -93,7 +93,7 @@ class BrewApp:
         # If calibration hasn't been completed, force first-time setup.
         self._settings = merge_with_defaults(load_settings())
         if not CFG.CALIBRATION_COMPLETE or not self._settings.get("calibration_complete"):
-            self._show_calibration_screen(first_time=True)
+            self._show_hardware_check_screen(first_time=True)
             return
 
         saved = load_state()
@@ -555,6 +555,175 @@ class BrewApp:
         self._show_setup_screen()
 
     # ==================================================================
+    #  Hardware Check Screen
+    # ==================================================================
+    def _show_hardware_check_screen(self, first_time: bool = False):
+        """Display detection status for every registered device."""
+        self._clear_container()
+        self._hc_first_time = first_time
+
+        outer = tk.Frame(self._container, bg=CFG.UI_BG_COLOR)
+        outer.pack(fill="both", expand=True, padx=PAD, pady=PAD)
+
+        title = tk.Label(outer, text="Hardware Check")
+        _style_label(title, FONT_LG)
+        title.pack(pady=(0, 4))
+
+        desc = tk.Label(
+            outer,
+            text="Verifying connected sensors and devices.\n"
+                 "Tap any item to expand or collapse wiring details.",
+            justify="center",
+        )
+        _style_label(desc, FONT_SM)
+        desc.pack(pady=(0, 6))
+
+        # Summary line (updated after checks run)
+        self._hc_summary = tk.Label(outer, text="")
+        _style_label(self._hc_summary, FONT_MD)
+        self._hc_summary.pack(pady=(0, 4))
+
+        # Footer buttons — pack bottom-first so they stay visible
+        footer = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
+        footer.pack(side="bottom", fill="x", pady=6)
+
+        btn_recheck = tk.Button(
+            footer, text="\u27F3  Recheck All", command=self._hc_recheck,
+        )
+        _style_button(btn_recheck)
+        btn_recheck.pack(side="left", padx=8)
+
+        btn_continue = tk.Button(
+            footer, text="Continue  \u2192", command=self._hc_continue,
+        )
+        _style_button(btn_continue)
+        btn_continue.config(bg=CFG.UI_OK, fg="#000")
+        btn_continue.pack(side="right", padx=8)
+
+        # Scrollable device list area
+        list_container = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
+        list_container.pack(fill="both", expand=True)
+
+        self._hc_canvas = tk.Canvas(
+            list_container, bg=CFG.UI_BG_COLOR, highlightthickness=0,
+        )
+        scrollbar = tk.Scrollbar(
+            list_container, orient="vertical", command=self._hc_canvas.yview,
+        )
+        self._hc_list_frame = tk.Frame(self._hc_canvas, bg=CFG.UI_BG_COLOR)
+        self._hc_list_frame.bind(
+            "<Configure>",
+            lambda e: self._hc_canvas.configure(
+                scrollregion=self._hc_canvas.bbox("all"),
+            ),
+        )
+        self._hc_canvas_window = self._hc_canvas.create_window(
+            (0, 0), window=self._hc_list_frame, anchor="nw",
+        )
+        self._hc_canvas.bind(
+            "<Configure>",
+            lambda e: self._hc_canvas.itemconfig(
+                self._hc_canvas_window, width=e.width,
+            ),
+        )
+        self._hc_canvas.configure(yscrollcommand=scrollbar.set)
+        self._hc_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Run checks
+        self._hc_recheck()
+
+    def _hc_recheck(self):
+        """Run all device checks and rebuild the result list."""
+        from hardware_check import run_all_checks
+
+        for w in self._hc_list_frame.winfo_children():
+            w.destroy()
+
+        results = run_all_checks(self.hw)
+        passed = sum(1 for r in results if r.detected)
+        total = len(results)
+
+        if passed == total:
+            self._hc_summary.config(
+                text=f"All {total} devices detected  \u2713", fg=CFG.UI_OK,
+            )
+        else:
+            self._hc_summary.config(
+                text=f"{passed} of {total} detected \u2014 expand items below for help",
+                fg=CFG.UI_WARN,
+            )
+
+        for result in results:
+            self._hc_add_device_row(result)
+
+    def _hc_add_device_row(self, result):
+        """Add one device entry to the hardware-check list."""
+        dev = result.device
+        detected = result.detected
+
+        row = tk.Frame(self._hc_list_frame, bg=CFG.UI_ENTRY_BG)
+        row.pack(fill="x", pady=3, padx=4)
+
+        # Header: icon + name + pin badge
+        header = tk.Frame(row, bg=CFG.UI_ENTRY_BG)
+        header.pack(fill="x", padx=8, pady=(6, 0))
+
+        icon_text = "\u2713" if detected else "\u2717"
+        icon_color = CFG.UI_OK if detected else CFG.UI_WARN
+
+        lbl_icon = tk.Label(
+            header, text=icon_text,
+            font=(CFG.UI_FONT_FAMILY, 18, "bold"),
+            fg=icon_color, bg=CFG.UI_ENTRY_BG,
+        )
+        lbl_icon.pack(side="left", padx=(0, 8))
+
+        lbl_name = tk.Label(
+            header, text=dev.name, font=FONT_MD,
+            fg=CFG.UI_FG_COLOR, bg=CFG.UI_ENTRY_BG, anchor="w",
+        )
+        lbl_name.pack(side="left")
+
+        lbl_pins = tk.Label(
+            header, text=f"[{dev.pins}]", font=FONT_SM,
+            fg=CFG.UI_ACCENT, bg=CFG.UI_ENTRY_BG,
+        )
+        lbl_pins.pack(side="right")
+
+        # Detail / troubleshoot frame (collapsible)
+        detail_frame = tk.Frame(row, bg=CFG.UI_ENTRY_BG)
+
+        detail_text = dev.troubleshoot
+        if result.detail:
+            detail_text += f"\n\nError detail: {result.detail}"
+
+        lbl_detail = tk.Label(
+            detail_frame, text=detail_text, font=FONT_SM,
+            fg=CFG.UI_FG_COLOR, bg=CFG.UI_ENTRY_BG,
+            justify="left", wraplength=650, anchor="w",
+        )
+        lbl_detail.pack(fill="x", padx=(36, 8), pady=(2, 6))
+
+        # Not-detected → expanded by default; detected → collapsed
+        if not detected:
+            detail_frame.pack(fill="x")
+
+        def _toggle(event=None, df=detail_frame):
+            if df.winfo_manager():
+                df.pack_forget()
+            else:
+                df.pack(fill="x")
+
+        for widget in (row, header, lbl_icon, lbl_name, lbl_pins):
+            widget.bind("<Button-1>", _toggle)
+            widget.config(cursor="hand2")
+
+    def _hc_continue(self):
+        """Proceed from hardware check to calibration."""
+        self._show_calibration_screen(first_time=self._hc_first_time)
+
+    # ==================================================================
     #  Calibration / First-Time Setup Wizard
     # ==================================================================
     def _show_calibration_screen(self, first_time: bool):
@@ -690,6 +859,15 @@ class BrewApp:
         btn_cancel = tk.Button(footer, text="Cancel", command=self._cancel_calibration)
         _style_button(btn_cancel)
         btn_cancel.pack(side="left", padx=8)
+
+        btn_hw = tk.Button(
+            footer, text="Hardware Check",
+            command=lambda: self._show_hardware_check_screen(
+                first_time=self._cal_first_time,
+            ),
+        )
+        _style_button(btn_hw)
+        btn_hw.pack(side="right", padx=8)
 
         # start pulse refresh
         self._refresh_cal_pulses()
