@@ -17,7 +17,7 @@ temperature monitoring, and power-loss recovery via a 7″ touchscreen UI.
 | 27   | Relay → AC mixing paddle       | 10 A+ relay channel                       |
 | 23   | Ultrasonic trigger (JSN-SR04T) |                                           |
 | 24   | Ultrasonic echo (JSN-SR04T)    | Voltage divider: 1 kΩ + 2 kΩ → 3.3 V safe |
-| 25   | Flow meter pulse (FL-608)      | Voltage divider: 1 kΩ + 2 kΩ → 3.3 V safe |
+| 25   | Flow meter pulse (FL-608)      | GPIO input w/ pull-up (divider if push-pull 5 V) |
 
 ### Wiring Details
 
@@ -29,6 +29,13 @@ temperature monitoring, and power-loss recovery via a 7″ touchscreen UI.
 - 4.7 kΩ resistor between 3.3 V and GPIO 4 (pull-up)
 
 **DIGITEN FL-608 Flow Meter (5 V pulse output → 3.3 V GPIO)**
+
+The code enables the Pi's internal pull-up on the flow-meter GPIO input.
+Many Hall-effect flow sensors present an **open-collector** output, in which case
+this is safe and you can wire the signal directly to the Pi.
+
+If your specific sensor outputs a **push-pull 5 V** digital signal, use a voltage
+divider or level shifter to protect the Pi.
 
 ```
 Flow meter yellow (signal) ──┬── 1 kΩ ── GPIO 25
@@ -68,6 +75,16 @@ Echo pin ──┬── 1 kΩ ── GPIO 24
 
 ## Software Setup
 
+### 0. Install OS packages
+
+Tkinter is required for the touchscreen UI. On Raspberry Pi OS / Debian this is
+usually provided by `python3-tk`.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-venv python3-tk
+```
+
 ### 1. Enable 1-Wire on the Pi
 
 ```bash
@@ -86,6 +103,9 @@ dtoverlay=w1-gpio,gpiopin=4
 ```bash
 mkdir -p /home/pi/brewer-controller
 # Copy all project files into /home/pi/brewer-controller/
+
+# This path is significant: by default AutoBrew writes logs/state/settings under
+# /home/pi/brewer-controller (see calibration.py).
 ```
 
 ### 3. Create a virtual environment and install dependencies
@@ -133,9 +153,11 @@ brewer-controller/
 ├── calibration.py       # Wiring + calibration constants (defaults)
 ├── process_defaults.py  # Brew/UI defaults
 ├── hardware.py          # GPIO / sensor abstraction layer
+├── hardware_check.py    # Per-device detection checks for the setup wizard
 ├── controller.py        # Brew-cycle state machine (fill → brew → complete)
 ├── state_manager.py     # JSON state persistence for power-loss recovery
 ├── settings_manager.py  # Persistent per-unit calibration settings (settings.json)
+├── shared_types.py      # Shared enums/types (Phase, state version)
 ├── ui.py                # Tkinter touchscreen GUI
 ├── logger_setup.py      # Centralised logging
 ├── requirements.txt     # Python dependencies
@@ -155,7 +177,10 @@ Tuneable parameters are split across:
 `config.py` remains as a backward-compatible facade (`import config as CFG`).
 
 Per-unit calibration is stored in `/home/pi/brewer-controller/settings.json` and loaded automatically at startup.
-If calibration has not been completed, the UI will force a first-time setup wizard.
+On first boot (or if `calibration_complete` is false), the UI forces the first-time setup flow.
+
+The runtime config constants come from `calibration.py` + `process_defaults.py`, then are overridden at import time
+by values found in `settings.json` (via `config.apply_runtime_settings()`).
 
 | Parameter                    | Default       | Description                                |
 | ---------------------------- | ------------- | ------------------------------------------ |
@@ -168,6 +193,23 @@ If calibration has not been completed, the UI will force a first-time setup wiza
 | `STIR_ON_SECONDS`            | 300 (5 min)   | Stirring duration per cycle                |
 | `STIR_CYCLE_SECONDS`         | 1800 (30 min) | Total cycle period (stir + rest)           |
 | `RELAY_ACTIVE_LOW`           | True          | Set based on your relay module             |
+
+In `settings.json`, these are stored under lower-case keys (e.g. `flow_pulses_per_gallon`,
+`tank_empty_distance_cm`, `tank_full_distance_cm`, `relay_active_low`, `calibration_complete`).
+
+## Hardware Check (Setup Wizard)
+
+AutoBrew includes an **individual component check** screen that validates each connected sensor/actuator.
+
+- On first run, AutoBrew shows **Hardware Check** first, then **Calibration / Setup**.
+- Tap any device row to expand/collapse wiring and troubleshooting guidance.
+- **Recheck All** reruns every device check.
+- **Continue** proceeds to calibration (it does not currently block if a device is missing).
+- On non-Pi platforms, some checks may report missing hardware (notably the DS18B20) unless the relevant libraries
+   and buses are available; this does not prevent UI development.
+
+What gets checked is defined in `hardware_check.py` as a registry (`DEVICE_REGISTRY`). If you add/remove hardware,
+update that list and the UI adapts automatically.
 
 ## Calibration (Recommended)
 
@@ -206,25 +248,30 @@ If you _do_ prefer filling the tank: fill to your intended working “full” le
 
 ## How It Works
 
-1. **Startup** — checks for a saved state file. If a previous cycle was
-   interrupted (power loss), prompts the user to resume or start fresh.
+1. **Startup** — loads per-unit settings from `settings.json`. If calibration
+   is not complete, forces the first-time setup flow:
+   **Hardware Check → Calibration / Setup**.
 
-2. **New Cycle Setup** — user enters fertilizer weight (lb), dilution
+2. **Resume detection** — after calibration is complete, checks for a saved
+   `brew_state.json`. If a previous cycle was interrupted (power loss), prompts
+   the user to resume or start fresh.
+
+3. **New Cycle Setup** — user enters fertilizer weight (lb), dilution
    ratio, and brew duration (1–36 hours). A checkbox allows skipping
    the water-fill phase.
 
-3. **Fill Phase** — opens the solenoid valve and counts flow-meter
+4. **Fill Phase** — opens the solenoid valve and counts flow-meter
    pulses until the calculated target gallons are reached. The
    ultrasonic level sensor acts as a safety veto: if the tank reaches
    95% full, the solenoid closes immediately.
 
-4. **Brew Phase** — the mixing paddle runs for 5 minutes every 30
+5. **Brew Phase** — the mixing paddle runs for 5 minutes every 30
    minutes. Temperature and elapsed time are displayed continuously.
 
-5. **Completion** — all relays are de-energised and the user is prompted
+6. **Completion** — all relays are de-energised and the user is prompted
    to start a new cycle.
 
-6. **State Saving** — every 60 seconds the current state is written to
+7. **State Saving** — every 60 seconds the current state is written to
    `brew_state.json` so the cycle can be resumed after a power loss.
 
 ---
@@ -234,7 +281,7 @@ If you _do_ prefer filling the tank: fill to your intended working “full” le
 - **Overfill veto** — ultrasonic sensor stops fill if level ≥ 95%
 - **Emergency stop button** — immediately de-energises all relays
 - **State persistence** — recovers from power loss with user confirmation
-- **Sensor error handling** — invalid temperature readings trigger alerts
+- **Temperature sanity check** — ignores suspect DS18B20 readings
 - **Atomic state writes** — write-to-temp + rename prevents corruption
 
 ---
@@ -248,3 +295,7 @@ If you _do_ prefer filling the tank: fill to your intended working “full” le
 - The UI runs in Tkinter and is optimised for the 800×480 7″ DSI display.
 - On non-Pi platforms the hardware layer runs in mock mode so the UI can
   be developed and tested without GPIO access.
+- Persistent files (defaults):
+   - `/home/pi/brewer-controller/brew_state.json` — resume state
+   - `/home/pi/brewer-controller/settings.json` — per-unit calibration
+   - `/home/pi/brewer-controller/autobrew.log` — file logs (in addition to journalctl when run as a service)
