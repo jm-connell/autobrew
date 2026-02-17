@@ -106,6 +106,9 @@ mkdir -p /home/pi/brewer-controller
 
 # This path is significant: by default AutoBrew writes logs/state/settings under
 # /home/pi/brewer-controller (see calibration.py).
+#
+# If you want to store logs/state elsewhere, set:
+#   AUTOBREW_STATE_DIR=/some/path
 ```
 
 ### 3. Create a virtual environment and install dependencies
