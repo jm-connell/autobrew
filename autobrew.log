@@ -9,3 +9,11 @@
 2026-02-17 00:55:01  INFO      [autobrew.hardware]  FlowMeter counter reset
 2026-02-17 00:55:01  INFO      [autobrew.hardware]  Relay 'solenoid' → ON
 2026-02-17 00:55:32  INFO      [autobrew.hardware]  Relay 'solenoid' → OFF
+2026-02-17 07:08:53  INFO      [autobrew]  Logging initialised (level=INFO)
+2026-02-17 07:08:53  INFO      [autobrew]  ═══ AutoBrew Controller starting ═══
+2026-02-17 07:08:53  INFO      [autobrew.hardware]  Initialising hardware …
+2026-02-17 07:08:53  INFO      [autobrew.hardware]  Relay 'solenoid' initialised on GPIO 17
+2026-02-17 07:08:53  INFO      [autobrew.hardware]  Relay 'paddle' initialised on GPIO 27
+2026-02-17 07:08:53  INFO      [autobrew.hardware]  FlowMeter initialised on GPIO 25 (1703 pulses/gal)
+2026-02-17 07:08:53  INFO      [autobrew.hardware]  UltrasonicLevel initialised (trigger=23, echo=24)
+2026-02-17 07:08:53  INFO      [autobrew.hardware]  Hardware initialisation complete
