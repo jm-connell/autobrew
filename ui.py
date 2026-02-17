@@ -158,6 +158,26 @@ class BrewApp:
         self._container = tk.Frame(self.root, bg=CFG.UI_BG_COLOR)
         self._container.pack(fill="both", expand=True)
 
+        # Mock mode state and persistent banner (hidden until enabled)
+        self._mock_mode = False
+        self._mock_banner = tk.Frame(self.root, bg="#f9e2af")
+        tk.Label(
+            self._mock_banner,
+            text="\u26A0  MOCK MODE \u2014 sensors simulated",
+            font=(CFG.UI_FONT_FAMILY, 11, "bold"),
+            bg="#f9e2af", fg="#1e1e2e",
+        ).pack(side="left", padx=10, pady=3)
+        tk.Button(
+            self._mock_banner,
+            text="Exit Mock Mode",
+            command=self._exit_mock_mode,
+            font=(CFG.UI_FONT_FAMILY, 10),
+            bg="#fab387", fg="#1e1e2e",
+            activebackground="#e6a272",
+            relief="flat", padx=8, pady=1,
+            cursor="hand2",
+        ).pack(side="right", padx=10, pady=3)
+
         # Decide which screen to show first
         # If calibration hasn't been completed, force first-time setup.
         self._settings = merge_with_defaults(load_settings())
@@ -194,6 +214,38 @@ class BrewApp:
             return
         self.hw.cleanup()
         self.root.destroy()
+
+    # ------------------------------------------------------------------
+    #  Mock Mode
+    # ------------------------------------------------------------------
+    def _enable_mock_mode(self):
+        """Activate mock mode \u2014 bypass hardware checks with simulated sensors."""
+        self._mock_mode = True
+        self._mock_banner.pack(side="top", fill="x", before=self._container)
+
+        # Apply default calibration values in memory so the app can proceed
+        self._settings = merge_with_defaults(load_settings())
+        self._settings["calibration_complete"] = True
+        CFG.apply_runtime_settings(self._settings)
+
+        # Refresh the hardware check to show mock results
+        self._hc_recheck()
+
+    def _exit_mock_mode(self):
+        """Leave mock mode and return to hardware check."""
+        self._mock_mode = False
+        self._mock_banner.pack_forget()
+
+        # Stop any running cycle (sensors aren\u2019t real)
+        if self.ctrl.running:
+            self.ctrl.stop_async(emergency=False, cancel_state=True)
+
+        # Reset calibration complete if not actually calibrated on disk
+        saved_settings = load_settings()
+        if not saved_settings or not saved_settings.get("calibration_complete"):
+            CFG.CALIBRATION_COMPLETE = False
+
+        self._show_hardware_check_screen(first_time=True)
 
     # ==================================================================
     #  Screen 1: Resume Prompt
@@ -662,6 +714,14 @@ class BrewApp:
         _style_button(btn_recheck)
         btn_recheck.pack(side="left", padx=_px(8))
 
+        btn_mock = tk.Button(
+            footer, text="\u2699  Mock Mode",
+            command=self._enable_mock_mode,
+        )
+        _style_button(btn_mock)
+        btn_mock.config(bg="#f9e2af", fg="#1e1e2e")
+        btn_mock.pack(side="left", padx=_px(8))
+
         btn_continue = tk.Button(
             footer, text="Continue  \u2192", command=self._hc_continue,
         )
@@ -704,12 +764,18 @@ class BrewApp:
 
     def _hc_recheck(self):
         """Run all device checks and rebuild the result list."""
-        from hardware_check import run_all_checks
+        from hardware_check import run_all_checks, DEVICE_REGISTRY, CheckResult
 
         for w in self._hc_list_frame.winfo_children():
             w.destroy()
 
-        results = run_all_checks(self.hw)
+        if self._mock_mode:
+            results = [
+                CheckResult(device=dev, detected=True, detail="(simulated)")
+                for dev in DEVICE_REGISTRY
+            ]
+        else:
+            results = run_all_checks(self.hw)
         passed = sum(1 for r in results if r.detected)
         total = len(results)
 
@@ -789,8 +855,12 @@ class BrewApp:
             widget.config(cursor="hand2")
 
     def _hc_continue(self):
-        """Proceed from hardware check to calibration."""
-        self._show_calibration_screen(first_time=self._hc_first_time)
+        """Proceed from hardware check."""
+        if self._mock_mode and CFG.CALIBRATION_COMPLETE:
+            # In mock mode with defaults applied, skip straight to main UI
+            self._show_setup_screen()
+        else:
+            self._show_calibration_screen(first_time=self._hc_first_time)
 
     # ==================================================================
     #  Calibration / First-Time Setup Wizard
@@ -803,122 +873,21 @@ class BrewApp:
         self._cal_first_time = bool(first_time)
 
         outer = tk.Frame(self._container, bg=CFG.UI_BG_COLOR)
-        outer.pack(fill="both", expand=True, padx=PAD, pady=PAD)
+        outer.pack(fill="both", expand=True, padx=PAD, pady=(_px(4), PAD))
 
         title_txt = "First-Time Setup" if first_time else "Calibration / Setup"
         title = tk.Label(outer, text=title_txt)
         _style_label(title, FONT_LG)
-        title.pack(pady=(0, _px(8)))
+        title.pack(pady=(0, _px(2)))
 
-        desc = (
-            "This wizard calibrates sensors for THIS unit.\n"
-            "You can rerun it any time from the main screens."
-        )
-        lbl_desc = tk.Label(outer, text=desc, justify="center")
+        desc_txt = "Calibrate sensors for this unit. Rerun any time from the main screen."
+        lbl_desc = tk.Label(outer, text=desc_txt, justify="center")
         _style_label(lbl_desc, FONT_SM)
-        lbl_desc.pack(pady=(0, _px(10)))
+        lbl_desc.pack(pady=(0, _px(4)))
 
-        # --- Flow calibration block ---
-        flow_box = tk.Frame(outer, bg=CFG.UI_ENTRY_BG)
-        flow_box.pack(fill="x", pady=_px(8))
-
-        lbl_flow = tk.Label(flow_box, text="Flow Meter Calibration (pulses per gallon)")
-        lbl_flow.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_flow.pack(anchor="w", padx=PAD, pady=(_px(8), 0))
-
-        instructions = (
-            "1) Put discharge into a measured container or to drain.\n"
-            "2) Press 'Run Water' to open the solenoid and count pulses.\n"
-            "3) Press 'Stop Water' when done, enter ACTUAL gallons dispensed, then Save."
-        )
-        lbl_inst = tk.Label(flow_box, text=instructions, justify="left")
-        lbl_inst.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_inst.pack(anchor="w", padx=PAD, pady=_px(6))
-
-        self._flow_pulses_start = 0
-        self._flow_running = False
-
-        row = tk.Frame(flow_box, bg=CFG.UI_ENTRY_BG)
-        row.pack(fill="x", padx=PAD, pady=(0, _px(8)))
-
-        self._lbl_flow_pulses = tk.Label(row, text="Pulses: 0")
-        self._lbl_flow_pulses.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
-        self._lbl_flow_pulses.pack(side="left", padx=(0, _px(12)))
-
-        tk.Label(row, text="Actual gallons:", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
-        self._ent_flow_actual_gal = tk.Entry(row)
-        _style_entry(self._ent_flow_actual_gal)
-        self._ent_flow_actual_gal.insert(0, "10")
-        self._ent_flow_actual_gal.pack(side="left", padx=_px(8))
-
-        self._btn_flow_run = tk.Button(row, text="Run Water", command=self._on_flow_run)
-        _style_button(self._btn_flow_run)
-        self._btn_flow_run.pack(side="left", padx=_px(8))
-
-        self._btn_flow_stop = tk.Button(row, text="Stop Water", command=self._on_flow_stop, state="disabled")
-        _style_button(self._btn_flow_stop)
-        self._btn_flow_stop.pack(side="left", padx=_px(8))
-
-        self._lbl_flow_result = tk.Label(flow_box, text="")
-        self._lbl_flow_result.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_OK)
-        self._lbl_flow_result.pack(anchor="w", padx=PAD, pady=(0, _px(8)))
-
-        # --- Ultrasonic calibration block ---
-        ultra_box = tk.Frame(outer, bg=CFG.UI_ENTRY_BG)
-        ultra_box.pack(fill="x", pady=_px(8))
-
-        lbl_ultra = tk.Label(ultra_box, text="Ultrasonic Tank Geometry")
-        lbl_ultra.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_ultra.pack(anchor="w", padx=PAD, pady=(_px(8), 0))
-
-        ultra_hint = (
-            "Tip: You do NOT have to fill the tank to calibrate. You can hold a target under the sensor\n"
-            "at the desired distance and press 'Use current as EMPTY/FULL'. A flat target (clipboard/board)\n"
-            "is more repeatable than a hand, but a hand can work in a pinch."
-        )
-        lbl_ultra_hint = tk.Label(ultra_box, text=ultra_hint, justify="left")
-        lbl_ultra_hint.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_ultra_hint.pack(anchor="w", padx=PAD, pady=_px(6))
-
-        urow = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
-        urow.pack(fill="x", padx=PAD, pady=_px(8))
-
-        tk.Label(urow, text="Empty dist (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
-        self._ent_empty_cm = tk.Entry(urow)
-        _style_entry(self._ent_empty_cm)
-        self._ent_empty_cm.insert(0, str(self._settings.get("tank_empty_distance_cm", CFG.TANK_EMPTY_DISTANCE_CM)))
-        self._ent_empty_cm.pack(side="left", padx=_px(6))
-
-        tk.Label(urow, text="Full dist (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
-        self._ent_full_cm = tk.Entry(urow)
-        _style_entry(self._ent_full_cm)
-        self._ent_full_cm.insert(0, str(self._settings.get("tank_full_distance_cm", CFG.TANK_FULL_DISTANCE_CM)))
-        self._ent_full_cm.pack(side="left", padx=_px(6))
-
-        tk.Label(urow, text="Capacity (gal):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
-        self._ent_capacity = tk.Entry(urow)
-        _style_entry(self._ent_capacity)
-        self._ent_capacity.insert(0, str(self._settings.get("tank_capacity_gallons", CFG.TANK_CAPACITY_GALLONS)))
-        self._ent_capacity.pack(side="left", padx=_px(6))
-
-        btns = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
-        btns.pack(fill="x", padx=PAD, pady=(0, _px(8)))
-
-        b_empty = tk.Button(btns, text="Use current as EMPTY", command=self._use_current_as_empty)
-        _style_button(b_empty)
-        b_empty.pack(side="left", padx=_px(6))
-
-        b_full = tk.Button(btns, text="Use current as FULL", command=self._use_current_as_full)
-        _style_button(b_full)
-        b_full.pack(side="left", padx=_px(6))
-
-        self._lbl_ultra_read = tk.Label(btns, text="")
-        self._lbl_ultra_read.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
-        self._lbl_ultra_read.pack(side="left", padx=_px(10))
-
-        # --- Footer buttons ---
+        # --- Footer buttons (pack bottom-first so they always stay visible) ---
         footer = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
-        footer.pack(fill="x", pady=_px(10))
+        footer.pack(side="bottom", fill="x", pady=(_px(4), 0))
 
         btn_save = tk.Button(footer, text="Save Calibration", command=self._save_calibration)
         _style_button(btn_save)
@@ -937,6 +906,119 @@ class BrewApp:
         )
         _style_button(btn_hw)
         btn_hw.pack(side="right", padx=_px(8))
+
+        # --- Scrollable content area (fits 800x480 with footer always visible) ---
+        content_canvas = tk.Canvas(outer, bg=CFG.UI_BG_COLOR, highlightthickness=0)
+        content_frame = tk.Frame(content_canvas, bg=CFG.UI_BG_COLOR)
+        content_frame.bind(
+            "<Configure>",
+            lambda e: content_canvas.configure(scrollregion=content_canvas.bbox("all")),
+        )
+        _cal_cw = content_canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        content_canvas.bind(
+            "<Configure>",
+            lambda e: content_canvas.itemconfig(_cal_cw, width=e.width),
+        )
+        content_canvas.pack(fill="both", expand=True)
+
+        # --- Flow calibration block ---
+        flow_box = tk.Frame(content_frame, bg=CFG.UI_ENTRY_BG)
+        flow_box.pack(fill="x", pady=_px(4))
+
+        lbl_flow = tk.Label(flow_box, text="Flow Meter Calibration (pulses per gallon)")
+        lbl_flow.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
+        lbl_flow.pack(anchor="w", padx=PAD, pady=(_px(6), 0))
+
+        instructions = (
+            "Direct discharge to a measured container. Press 'Run Water' to open the solenoid,\n"
+            "'Stop Water' when done, enter actual gallons dispensed, then Save."
+        )
+        lbl_inst = tk.Label(flow_box, text=instructions, justify="left")
+        lbl_inst.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
+        lbl_inst.pack(anchor="w", padx=PAD, pady=(_px(2), _px(4)))
+
+        self._flow_pulses_start = 0
+        self._flow_running = False
+
+        row1 = tk.Frame(flow_box, bg=CFG.UI_ENTRY_BG)
+        row1.pack(fill="x", padx=PAD, pady=(0, _px(2)))
+
+        self._btn_flow_run = tk.Button(row1, text="Run Water", command=self._on_flow_run)
+        _style_button(self._btn_flow_run)
+        self._btn_flow_run.pack(side="left", padx=(0, _px(6)))
+
+        self._btn_flow_stop = tk.Button(row1, text="Stop Water", command=self._on_flow_stop, state="disabled")
+        _style_button(self._btn_flow_stop)
+        self._btn_flow_stop.pack(side="left", padx=(0, _px(12)))
+
+        self._lbl_flow_pulses = tk.Label(row1, text="Pulses: 0")
+        self._lbl_flow_pulses.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
+        self._lbl_flow_pulses.pack(side="left")
+
+        row2 = tk.Frame(flow_box, bg=CFG.UI_ENTRY_BG)
+        row2.pack(fill="x", padx=PAD, pady=(0, _px(6)))
+
+        tk.Label(row2, text="Actual gallons:", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
+        self._ent_flow_actual_gal = tk.Entry(row2)
+        _style_entry(self._ent_flow_actual_gal)
+        self._ent_flow_actual_gal.insert(0, "10")
+        self._ent_flow_actual_gal.pack(side="left", padx=_px(6))
+
+        self._lbl_flow_result = tk.Label(row2, text="")
+        self._lbl_flow_result.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_OK)
+        self._lbl_flow_result.pack(side="left", padx=_px(8))
+
+        # --- Ultrasonic calibration block ---
+        ultra_box = tk.Frame(content_frame, bg=CFG.UI_ENTRY_BG)
+        ultra_box.pack(fill="x", pady=_px(4))
+
+        lbl_ultra = tk.Label(ultra_box, text="Ultrasonic Tank Geometry")
+        lbl_ultra.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
+        lbl_ultra.pack(anchor="w", padx=PAD, pady=(_px(6), 0))
+
+        ultra_hint = (
+            "Hold a flat target under the sensor at the desired distance and press\n"
+            "'Use current as EMPTY/FULL', or enter distances manually."
+        )
+        lbl_ultra_hint = tk.Label(ultra_box, text=ultra_hint, justify="left")
+        lbl_ultra_hint.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
+        lbl_ultra_hint.pack(anchor="w", padx=PAD, pady=(_px(2), _px(4)))
+
+        urow = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
+        urow.pack(fill="x", padx=PAD, pady=(0, _px(4)))
+
+        tk.Label(urow, text="Empty (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
+        self._ent_empty_cm = tk.Entry(urow)
+        _style_entry(self._ent_empty_cm)
+        self._ent_empty_cm.insert(0, str(self._settings.get("tank_empty_distance_cm", CFG.TANK_EMPTY_DISTANCE_CM)))
+        self._ent_empty_cm.pack(side="left", padx=_px(4))
+
+        tk.Label(urow, text="Full (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
+        self._ent_full_cm = tk.Entry(urow)
+        _style_entry(self._ent_full_cm)
+        self._ent_full_cm.insert(0, str(self._settings.get("tank_full_distance_cm", CFG.TANK_FULL_DISTANCE_CM)))
+        self._ent_full_cm.pack(side="left", padx=_px(4))
+
+        tk.Label(urow, text="Capacity (gal):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
+        self._ent_capacity = tk.Entry(urow)
+        _style_entry(self._ent_capacity)
+        self._ent_capacity.insert(0, str(self._settings.get("tank_capacity_gallons", CFG.TANK_CAPACITY_GALLONS)))
+        self._ent_capacity.pack(side="left", padx=_px(4))
+
+        btns = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
+        btns.pack(fill="x", padx=PAD, pady=(0, _px(6)))
+
+        b_empty = tk.Button(btns, text="Use current as EMPTY", command=self._use_current_as_empty)
+        _style_button(b_empty)
+        b_empty.pack(side="left", padx=(0, _px(6)))
+
+        b_full = tk.Button(btns, text="Use current as FULL", command=self._use_current_as_full)
+        _style_button(b_full)
+        b_full.pack(side="left", padx=(0, _px(6)))
+
+        self._lbl_ultra_read = tk.Label(btns, text="")
+        self._lbl_ultra_read.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
+        self._lbl_ultra_read.pack(side="left", padx=_px(6))
 
         # start pulse refresh
         self._refresh_cal_pulses()
@@ -1054,7 +1136,7 @@ class BrewApp:
         except Exception:
             pass
 
-        if self._cal_first_time:
+        if self._cal_first_time and not self._mock_mode:
             messagebox.showwarning(
                 "Setup Required",
                 "Calibration is required before using the system.",
