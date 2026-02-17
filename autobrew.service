@@ -17,19 +17,22 @@ After=graphical.target
 Wants=graphical.target
 
 [Service]
-# Run as the 'pi' user (needs GPIO and display access)
-User=pi
-Group=pi
+# Run as the desktop user (needs GPIO and display access)
+User=jon
+Group=jon
 
 # Ensure the display is available for Tkinter
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/pi/.Xauthority
+Environment=XAUTHORITY=/home/jon/.Xauthority
+
+# Where AutoBrew stores logs/state/settings (optional override)
+Environment=AUTOBREW_STATE_DIR=/home/jon/autobrew
 
 # Working directory
-WorkingDirectory=/home/pi/brewer-controller
+WorkingDirectory=/home/jon/autobrew
 
 # Use the project venv's Python
-ExecStart=/home/pi/brewer-controller/venv/bin/python main.py
+ExecStart=/home/jon/autobrew/venv/bin/python main.py
 
 # Restart on crash (but not on clean exit)
 Restart=on-failure
