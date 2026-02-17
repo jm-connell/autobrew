@@ -15,6 +15,7 @@ Usage (production — via systemd):
 import signal
 import sys
 import logging
+import os
 
 from logger_setup import setup_logging
 from hardware import HardwareManager
@@ -46,6 +47,13 @@ def main():
 
     # ── UI ────────────────────────────────────────────────────────────
     try:
+        if not os.environ.get("DISPLAY"):
+            log.error(
+                "No $DISPLAY found; Tkinter UI cannot start in headless mode. "
+                "Run from the Pi desktop/touchscreen session, or test via X11 forwarding (ssh -X), "
+                "or use a virtual framebuffer (xvfb-run)."
+            )
+            return
         app = BrewApp(hw, ctrl)
         app.run()  # blocks until window closed
     except Exception as exc:

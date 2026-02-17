@@ -5,6 +5,7 @@ real-world calibration (flow meter pulse constant, ultrasonic geometry,
 relay polarity, etc.).
 """
 
+import os
 from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────────────
@@ -47,9 +48,43 @@ LEVEL_SENSOR_FAILSAFE_STOP = True
 # Most relay HATs for Pi are active-low (relay energises when GPIO is LOW).
 RELAY_ACTIVE_LOW = True
 
+def _can_use_dir(path: Path) -> bool:
+	try:
+		path.mkdir(parents=True, exist_ok=True)
+		return True
+	except OSError:
+		return False
+
+
+def _default_state_dir() -> Path:
+	"""Pick a writable directory for logs/state/settings.
+
+	Priority:
+	  1) $AUTOBREW_STATE_DIR (if set and writable)
+	  2) /home/pi/brewer-controller (production default on the Pi)
+	  3) Project directory (directory containing this file)
+	"""
+
+	env_dir = os.getenv("AUTOBREW_STATE_DIR")
+	if env_dir:
+		candidate = Path(env_dir).expanduser()
+		if _can_use_dir(candidate):
+			return candidate
+
+	for candidate in (
+		Path("/home/pi/brewer-controller"),
+		Path(__file__).resolve().parent,
+	):
+		if _can_use_dir(candidate):
+			return candidate
+
+	# As a last resort, fall back to the current working directory.
+	return Path.cwd()
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Persistence paths
 # ──────────────────────────────────────────────────────────────────────
-STATE_DIR  = Path("/home/pi/brewer-controller")
-STATE_FILE = STATE_DIR / "brew_state.json"
-LOG_FILE   = STATE_DIR / "autobrew.log"
+STATE_DIR: Path = _default_state_dir()
+STATE_FILE: Path = STATE_DIR / "brew_state.json"
+LOG_FILE: Path = STATE_DIR / "autobrew.log"
