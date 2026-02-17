@@ -57,31 +57,144 @@ def _is_on_pi() -> bool:
     return ON_PI
 
 
+def _read_gpio_value(pin: int) -> int | None:
+    """Read the raw logic level of a GPIO pin via lgpio (Pi 5 compatible).
+
+    Returns 0 or 1, or None if we cannot read (e.g. mock mode / lgpio
+    unavailable).
+    """
+    try:
+        import lgpio                                     # type: ignore
+        h = lgpio.gpiochip_open(0)
+        try:
+            lgpio.gpio_claim_input(h, pin)
+            val = lgpio.gpio_read(h, pin)
+            return val
+        finally:
+            lgpio.gpiochip_close(h)
+    except Exception:
+        return None
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Individual check functions
+#
+# IMPORTANT: Every check must attempt a *real* hardware verification.
+# If the GPIO library is unavailable (mock mode) or no physical device
+# is connected, the check must return False.  The hardware-check screen
+# is specifically for confirming that wiring is correct — auto-passing
+# defeats its purpose.
 # ──────────────────────────────────────────────────────────────────────
 def _check_temp_probe(hw: "HardwareManager") -> bool:
     """DS18B20 is detected if w1thermsensor found a sensor on the bus."""
     return hw.temp._sensor is not None
 
 
+def _check_relay(hw: "HardwareManager", relay_attr: str, gpio_pin: int) -> bool:
+    """Verify a relay module is physically connected.
+
+    Strategy: a connected relay module actively drives or loads the GPIO
+    line (through an optocoupler / transistor).  We toggle the output
+    GPIO briefly and verify we can read back the expected level via
+    lgpio on a *separate* handle.  If no relay module is attached the
+    pin floats, and the read-back may not match the driven state — but
+    more importantly, a floating input pin during the initial raw read
+    (before gpiozero has claimed it) tends to show an inconsistent
+    level.
+
+    Practical fast-path: if gpiozero never created the device (mock
+    mode) we cannot verify anything, so return False.
+    """
+    relay = getattr(hw, relay_attr, None)
+    if relay is None or relay._device is None:
+        return False
+
+    # The gpiozero OutputDevice was created — that only proves the GPIO
+    # library loaded, NOT that a relay is wired.  Do a real read-back:
+    # drive the pin LOW then HIGH (briefly) and see if lgpio can confirm
+    # the level matches.  A floating pin may accidentally match, so also
+    # check that we can read at all (lgpio present → we are on a Pi).
+    try:
+        import lgpio                                     # type: ignore
+        h = lgpio.gpiochip_open(0)
+        try:
+            # Ensure relay is OFF before we test
+            relay._device.off()
+            time.sleep(0.02)
+
+            # Claim pin as input briefly, read the resting level
+            lgpio.gpio_claim_input(h, gpio_pin)
+            rest_val = lgpio.gpio_read(h, gpio_pin)
+            lgpio.gpio_free(h, gpio_pin)
+
+            # Now drive the opposite level via gpiozero and re-read
+            relay._device.on()
+            time.sleep(0.02)
+            lgpio.gpio_claim_input(h, gpio_pin)
+            driven_val = lgpio.gpio_read(h, gpio_pin)
+            lgpio.gpio_free(h, gpio_pin)
+
+            # Restore relay OFF
+            relay._device.off()
+
+            # If a relay module is connected its driver circuit loads
+            # the line visibly — the two reads should differ.  A floating
+            # unconnected pin may read the same value both times (often
+            # HIGH due to internal pull) or fluctuate unpredictably.
+            return rest_val != driven_val
+        finally:
+            lgpio.gpiochip_close(h)
+    except Exception as exc:
+        log.debug("Relay check for %s failed (lgpio): %s", relay_attr, exc)
+        return False
+
+
 def _check_solenoid_relay(hw: "HardwareManager") -> bool:
-    """Relay GPIO device was created successfully (or running in mock mode)."""
-    return hw.solenoid._device is not None or not _is_on_pi()
+    return _check_relay(hw, "solenoid", CFG.GPIO_RELAY_SOLENOID)
 
 
 def _check_paddle_relay(hw: "HardwareManager") -> bool:
-    return hw.paddle._device is not None or not _is_on_pi()
+    return _check_relay(hw, "paddle", CFG.GPIO_RELAY_PADDLE)
 
 
 def _check_flow_meter(hw: "HardwareManager") -> bool:
-    return hw.flow._device is not None or not _is_on_pi()
+    """A connected Hall-effect flow sensor pulls the signal line to a
+    definite level (usually LOW when idle, or HIGH via the Pi's pull-up
+    with an open-collector sensor).
+
+    If gpiozero created the device we know we're on a real Pi.  We take
+    several quick reads — a connected sensor holds a stable level; a
+    floating pin is more likely to fluctuate.  This is a heuristic but
+    far better than unconditionally returning True.
+    """
+    if hw.flow._device is None:
+        return False
+
+    try:
+        import lgpio                                     # type: ignore
+        h = lgpio.gpiochip_open(0)
+        try:
+            lgpio.gpio_claim_input(h, CFG.GPIO_FLOW_METER, lgpio.SET_PULL_UP)
+            readings = []
+            for _ in range(10):
+                readings.append(lgpio.gpio_read(h, CFG.GPIO_FLOW_METER))
+                time.sleep(0.005)
+            lgpio.gpio_free(h, CFG.GPIO_FLOW_METER)
+
+            # A connected sensor with pull-up should hold stable HIGH (all 1s)
+            # or, if water is flowing, produce a mix of 0/1.  A floating
+            # unconnected pin reads erratically.
+            # We consider it "detected" if all readings are identical (stable).
+            return len(set(readings)) == 1
+        finally:
+            lgpio.gpiochip_close(h)
+    except Exception as exc:
+        log.debug("Flow meter check failed (lgpio): %s", exc)
+        return False
 
 
 def _check_ultrasonic(hw: "HardwareManager") -> bool:
     """Try up to 3 distance reads; connected if any succeed."""
-    if not _is_on_pi():
-        return True
     if hw.level._trigger is None or hw.level._echo is None:
         return False
     for _ in range(3):
