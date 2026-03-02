@@ -1,2 +1,4 @@
 /__pycache__
 autobrew.log
+brew_state.json
+/venv
