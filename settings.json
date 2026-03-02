@@ -1,0 +1,12 @@
+{
+  "settings_version": 1,
+  "calibration_complete": true,
+  "calibrated_at": "2026-02-18T23:47:56.273169",
+  "flow_pulses_per_gallon": 1703,
+  "tank_capacity_gallons": 500.0,
+  "tank_empty_distance_cm": 118.0,
+  "tank_full_distance_cm": 10.0,
+  "tank_overfill_pct": 95.0,
+  "level_sensor_failsafe_stop": true,
+  "relay_active_low": true
+}

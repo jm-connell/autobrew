@@ -137,7 +137,13 @@ class BrewApp:
 
         if use_fullscreen:
             try:
+                # overrideredirect bypasses the window manager entirely so the
+                # Pi taskbar (lxpanel / waybar) cannot sit on top of the window.
+                self.root.overrideredirect(True)
                 self.root.attributes("-fullscreen", True)
+                sw = self.root.winfo_screenwidth()
+                sh = self.root.winfo_screenheight()
+                self.root.geometry(f"{sw}x{sh}+0+0")
             except tk.TclError:
                 use_fullscreen = False
 
