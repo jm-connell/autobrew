@@ -13,13 +13,19 @@ from pathlib import Path
 # ──────────────────────────────────────────────────────────────────────
 GPIO_DS18B20 = 4  # informational; w1thermsensor auto-detects
 
-GPIO_RELAY_SOLENOID = 17   # 12 V solenoid valve
-GPIO_RELAY_PADDLE   = 27   # AC mixing paddle
-
 GPIO_ULTRA_TRIGGER = 23
 GPIO_ULTRA_ECHO    = 24
 
-GPIO_FLOW_METER = 25
+GPIO_FLOW_METER = 17       # DIGITEN Hall-effect pulse line
+
+# ──────────────────────────────────────────────────────────────────────
+# Modbus RTU Relay  (Waveshare 8-ch, RS485 via USB adapter)
+# ──────────────────────────────────────────────────────────────────────
+MODBUS_SERIAL_PORT   = "/dev/ttyUSB0"
+MODBUS_BAUDRATE      = 9600
+MODBUS_SLAVE_ID      = 1
+MODBUS_CH_SOLENOID   = 0     # coil address for CH1 (0-indexed)
+MODBUS_CH_PADDLE     = 1     # coil address for CH2 (0-indexed)
 
 # ──────────────────────────────────────────────────────────────────────
 # Flow Meter Calibration
@@ -43,9 +49,9 @@ TANK_OVERFILL_PCT = 95.0
 LEVEL_SENSOR_FAILSAFE_STOP = True
 
 # ──────────────────────────────────────────────────────────────────────
-# Relay polarity
+# Relay polarity  (only relevant if GPIO relays are used; Modbus relays
+# ignore this setting)
 # ──────────────────────────────────────────────────────────────────────
-# Most relay HATs for Pi are active-low (relay energises when GPIO is LOW).
 RELAY_ACTIVE_LOW = True
 
 def _can_use_dir(path: Path) -> bool:

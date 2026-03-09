@@ -33,9 +33,146 @@ except ImportError:
     HAS_W1 = False
     log.warning("w1thermsensor not available — temperature will be simulated")
 
+try:
+    from pymodbus.client import ModbusSerialClient
+    HAS_MODBUS = True
+except ImportError:
+    HAS_MODBUS = False
+    log.warning("pymodbus not available — relay control will be simulated")
+
 
 # ======================================================================
-#  Relay helper
+#  Shared Modbus RTU serial client (singleton)
+# ======================================================================
+_modbus_client: "ModbusSerialClient | None" = None
+_modbus_lock = threading.Lock()
+
+
+def get_modbus_client() -> "ModbusSerialClient | None":
+    """Return (and lazily create) a shared Modbus serial client.
+
+    Thread-safe.  Returns None when pymodbus is absent or the port
+    cannot be opened.
+    """
+    global _modbus_client
+    if not HAS_MODBUS:
+        return None
+    with _modbus_lock:
+        if _modbus_client is not None:
+            return _modbus_client
+        try:
+            client = ModbusSerialClient(
+                port=CFG.MODBUS_SERIAL_PORT,
+                baudrate=CFG.MODBUS_BAUDRATE,
+                parity="N",
+                stopbits=1,
+                bytesize=8,
+                timeout=1,
+            )
+            if client.connect():
+                log.info(
+                    "Modbus RTU client connected on %s @ %d baud",
+                    CFG.MODBUS_SERIAL_PORT,
+                    CFG.MODBUS_BAUDRATE,
+                )
+                _modbus_client = client
+                return client
+            else:
+                log.error("Modbus RTU connect() failed on %s", CFG.MODBUS_SERIAL_PORT)
+                return None
+        except Exception as exc:
+            log.error("Modbus RTU init error: %s", exc)
+            return None
+
+
+# ======================================================================
+#  Modbus Relay Channel  (Waveshare 8-ch RTU relay, RS485/USB)
+# ======================================================================
+class ModbusRelayChannel:
+    """Controls one channel of a Waveshare Modbus RTU relay board.
+
+    Exposes the same .on() / .off() / .is_on / .cleanup() interface as
+    the old GPIO RelayChannel so the rest of the application (controller,
+    UI, hardware_check) does not need to change.
+    """
+
+    def __init__(self, coil_address: int, name: str = "relay"):
+        self.name = name
+        self._coil = coil_address
+        self._state = False
+        self._client = get_modbus_client()  # may be None in mock mode
+        if self._client is not None:
+            log.info(
+                "Modbus relay '%s' initialised (coil %d, slave %d)",
+                name,
+                coil_address,
+                CFG.MODBUS_SLAVE_ID,
+            )
+        else:
+            log.warning("Modbus relay '%s' — no client (mock / offline)", name)
+
+    # -- public ---------------------------------------------------------
+    def on(self):
+        self._write(True)
+        self._state = True
+        log.info("Relay '%s' → ON", self.name)
+
+    def off(self):
+        self._write(False)
+        self._state = False
+        log.info("Relay '%s' → OFF", self.name)
+
+    @property
+    def is_on(self) -> bool:
+        return self._state
+
+    def cleanup(self):
+        self.off()
+
+    # -- internal -------------------------------------------------------
+    def _write(self, value: bool):
+        client = self._client or get_modbus_client()
+        if client is None:
+            return
+        with _modbus_lock:
+            try:
+                client.write_coil(
+                    self._coil,
+                    value,
+                    device_id=CFG.MODBUS_SLAVE_ID,
+                )
+            except Exception as exc:
+                log.error(
+                    "Modbus write error (relay '%s', coil %d): %s",
+                    self.name,
+                    self._coil,
+                    exc,
+                )
+
+    def read_state(self) -> bool | None:
+        """Read the actual coil state from the relay board.
+
+        Returns True/False, or None if communication fails.
+        """
+        client = self._client or get_modbus_client()
+        if client is None:
+            return None
+        with _modbus_lock:
+            try:
+                result = client.read_coils(
+                    self._coil,
+                    count=1,
+                    device_id=CFG.MODBUS_SLAVE_ID,
+                )
+                if result.isError():
+                    return None
+                return result.bits[0]
+            except Exception:
+                return None
+
+
+# ======================================================================
+#  GPIO Relay helper (kept for reference / future GPIO relays)
 # ======================================================================
 class RelayChannel:
     """Controls a single relay channel via GPIO."""
@@ -314,8 +451,8 @@ class HardwareManager:
 
     def __init__(self):
         log.info("Initialising hardware …")
-        self.solenoid = RelayChannel(CFG.GPIO_RELAY_SOLENOID, "solenoid")
-        self.paddle = RelayChannel(CFG.GPIO_RELAY_PADDLE, "paddle")
+        self.solenoid = ModbusRelayChannel(CFG.MODBUS_CH_SOLENOID, "solenoid")
+        self.paddle = ModbusRelayChannel(CFG.MODBUS_CH_PADDLE, "paddle")
         self.flow = FlowMeter(CFG.GPIO_FLOW_METER, CFG.FLOW_PULSES_PER_GALLON)
         self.level = UltrasonicLevel(CFG.GPIO_ULTRA_TRIGGER, CFG.GPIO_ULTRA_ECHO)
         self.temp = TemperatureProbe()
@@ -334,4 +471,13 @@ class HardwareManager:
         self.flow.cleanup()
         self.level.cleanup()
         self.temp.cleanup()
+        # Close the shared Modbus connection
+        global _modbus_client
+        with _modbus_lock:
+            if _modbus_client is not None:
+                try:
+                    _modbus_client.close()
+                except Exception:
+                    pass
+                _modbus_client = None
         log.info("Hardware resources released")

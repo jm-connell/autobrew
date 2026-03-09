@@ -48,6 +48,12 @@ class BrewController:
         # When set, user requested a manual stop (do not persist resume state)
         self._cancel_requested = threading.Event()
 
+        # Fill-phase level-sensor failsafe pause mechanism
+        self._fill_failsafe_event = threading.Event()     # controller sets → UI detects
+        self._fill_failsafe_response = threading.Event()   # UI sets → controller unblocks
+        self._fill_failsafe_choice: str = ""               # "continue", "brew", or "cancel"
+        self._fill_failsafe_reason: str = ""
+
     # ------------------------------------------------------------------
     #  Calculation helpers
     # ------------------------------------------------------------------
@@ -94,6 +100,9 @@ class BrewController:
         self._stop_event.clear()
         self._manual_end_fill.clear()
         self._cancel_requested.clear()
+        self._fill_failsafe_event.clear()
+        self._fill_failsafe_response.clear()
+        self._fill_failsafe_choice = ""
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -117,6 +126,9 @@ class BrewController:
         self._stop_event.clear()
         self._manual_end_fill.clear()
         self._cancel_requested.clear()
+        self._fill_failsafe_event.clear()
+        self._fill_failsafe_response.clear()
+        self._fill_failsafe_choice = ""
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -228,6 +240,42 @@ class BrewController:
             self.running = False
 
     # ------------------------------------------------------------------
+    #  Fill-phase failsafe pause (blocks until UI provides a choice)
+    # ------------------------------------------------------------------
+    def _pause_fill_for_failsafe(self, reason: str) -> str:
+        """Pause the fill, ask the UI for a decision, return the choice.
+
+        Turns the solenoid OFF while waiting.  Returns one of:
+            "continue"  — ignore the warning and keep filling
+            "brew"      — stop fill, proceed to brew phase
+            "cancel"    — abort the entire cycle
+        """
+        self.hw.solenoid.off()
+        self.alert_msg = f"⚠ FILL PAUSED — {reason}"
+        log.warning("Fill paused for failsafe: %s", reason)
+
+        self._fill_failsafe_reason = reason
+        self._fill_failsafe_response.clear()
+        self._fill_failsafe_event.set()       # signal UI
+
+        # Block until the UI provides an answer (or stop is requested)
+        while not self._fill_failsafe_response.is_set():
+            if self._stop_event.is_set():
+                self._fill_failsafe_event.clear()
+                return "cancel"
+            time.sleep(0.1)
+
+        self._fill_failsafe_event.clear()
+        choice = self._fill_failsafe_choice
+        log.info("Fill failsafe user choice: %s", choice)
+
+        if choice == "continue":
+            self.alert_msg = ""
+            self.hw.solenoid.on()
+
+        return choice
+
+    # ------------------------------------------------------------------
     #  Fill phase
     # ------------------------------------------------------------------
     def _do_fill(self):
@@ -248,15 +296,31 @@ class BrewController:
 
             # Water level veto — emergency overfill protection
             level_pct = self.hw.level.read_level_pct()
-            if level_pct is None:
-                if CFG.LEVEL_SENSOR_FAILSAFE_STOP:
-                    self.alert_msg = "⚠ Level sensor failure — fill stopped (fail-safe)"
-                    log.error(self.alert_msg)
+            if level_pct is None and CFG.LEVEL_SENSOR_FAILSAFE_STOP:
+                choice = self._pause_fill_for_failsafe(
+                    "Level sensor failure — no reading returned"
+                )
+                if choice == "continue":
+                    continue
+                elif choice == "brew":
+                    self.alert_msg = "⚠ Level sensor failure — fill stopped by user"
                     break
-            else:
-                if level_pct >= CFG.TANK_OVERFILL_PCT:
-                    self.alert_msg = "⚠ Tank full — fill stopped (level veto)"
-                    log.warning(self.alert_msg)
+                else:  # cancel
+                    self._cancel_requested.set()
+                    self._stop_event.set()
+                    break
+            elif level_pct is not None and level_pct >= CFG.TANK_OVERFILL_PCT:
+                choice = self._pause_fill_for_failsafe(
+                    f"Tank overfill detected ({level_pct:.0f}% ≥ {CFG.TANK_OVERFILL_PCT:.0f}%)"
+                )
+                if choice == "continue":
+                    continue
+                elif choice == "brew":
+                    self.alert_msg = "⚠ Tank full — fill stopped by user"
+                    break
+                else:  # cancel
+                    self._cancel_requested.set()
+                    self._stop_event.set()
                     break
 
             # Periodic state save

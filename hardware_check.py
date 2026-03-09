@@ -90,106 +90,58 @@ def _check_temp_probe(hw: "HardwareManager") -> bool:
     return hw.temp._sensor is not None
 
 
-def _check_relay(hw: "HardwareManager", relay_attr: str, gpio_pin: int) -> bool:
-    """Verify a relay module is physically connected.
+def _check_relay(hw: "HardwareManager", relay_attr: str) -> bool:
+    """Verify a Modbus relay channel is reachable.
 
-    Strategy: a connected relay module actively drives or loads the GPIO
-    line (through an optocoupler / transistor).  We toggle the output
-    GPIO briefly and verify we can read back the expected level via
-    lgpio on a *separate* handle.  If no relay module is attached the
-    pin floats, and the read-back may not match the driven state — but
-    more importantly, a floating input pin during the initial raw read
-    (before gpiozero has claimed it) tends to show an inconsistent
-    level.
-
-    Practical fast-path: if gpiozero never created the device (mock
-    mode) we cannot verify anything, so return False.
+    Reads the coil state via the ModbusRelayChannel.read_state() method.
+    A successful read (True or False) means the relay board responded.
     """
     relay = getattr(hw, relay_attr, None)
-    if relay is None or relay._device is None:
+    if relay is None:
         return False
 
-    # The gpiozero OutputDevice was created — that only proves the GPIO
-    # library loaded, NOT that a relay is wired.  Do a real read-back:
-    # drive the pin LOW then HIGH (briefly) and see if lgpio can confirm
-    # the level matches.  A floating pin may accidentally match, so also
-    # check that we can read at all (lgpio present → we are on a Pi).
-    try:
-        import lgpio                                     # type: ignore
-        h = lgpio.gpiochip_open(0)
-        try:
-            # Ensure relay is OFF before we test
-            relay._device.off()
-            time.sleep(0.02)
+    # ModbusRelayChannel exposes read_state()
+    state = getattr(relay, "read_state", lambda: None)()
+    if state is not None:
+        return True
 
-            # Claim pin as input briefly, read the resting level
-            lgpio.gpio_claim_input(h, gpio_pin)
-            rest_val = lgpio.gpio_read(h, gpio_pin)
-            lgpio.gpio_free(h, gpio_pin)
-
-            # Now drive the opposite level via gpiozero and re-read
-            relay._device.on()
-            time.sleep(0.02)
-            lgpio.gpio_claim_input(h, gpio_pin)
-            driven_val = lgpio.gpio_read(h, gpio_pin)
-            lgpio.gpio_free(h, gpio_pin)
-
-            # Restore relay OFF
-            relay._device.off()
-
-            # If a relay module is connected its driver circuit loads
-            # the line visibly — the two reads should differ.  A floating
-            # unconnected pin may read the same value both times (often
-            # HIGH due to internal pull) or fluctuate unpredictably.
-            return rest_val != driven_val
-        finally:
-            lgpio.gpiochip_close(h)
-    except Exception as exc:
-        log.debug("Relay check for %s failed (lgpio): %s", relay_attr, exc)
-        return False
+    log.debug("Relay check for %s — no Modbus response", relay_attr)
+    return False
 
 
 def _check_solenoid_relay(hw: "HardwareManager") -> bool:
-    return _check_relay(hw, "solenoid", CFG.GPIO_RELAY_SOLENOID)
+    return _check_relay(hw, "solenoid")
 
 
 def _check_paddle_relay(hw: "HardwareManager") -> bool:
-    return _check_relay(hw, "paddle", CFG.GPIO_RELAY_PADDLE)
+    return _check_relay(hw, "paddle")
 
 
 def _check_flow_meter(hw: "HardwareManager") -> bool:
     """A connected Hall-effect flow sensor pulls the signal line to a
-    definite level (usually LOW when idle, or HIGH via the Pi's pull-up
-    with an open-collector sensor).
+    definite level (usually HIGH via pull-up with an open-collector sensor).
 
-    If gpiozero created the device we know we're on a real Pi.  We take
-    several quick reads — a connected sensor holds a stable level; a
-    floating pin is more likely to fluctuate.  This is a heuristic but
-    far better than unconditionally returning True.
+    We read the gpiozero DigitalInputDevice several times.  A connected
+    sensor holds a stable level; a floating pin is more likely to
+    fluctuate.  Raw lgpio reads are avoided because gpiozero already
+    owns the pin via the lgpio pin factory.
     """
     if hw.flow._device is None:
         return False
 
     try:
-        import lgpio                                     # type: ignore
-        h = lgpio.gpiochip_open(0)
-        try:
-            lgpio.gpio_claim_input(h, CFG.GPIO_FLOW_METER, lgpio.SET_PULL_UP)
-            readings = []
-            for _ in range(10):
-                readings.append(lgpio.gpio_read(h, CFG.GPIO_FLOW_METER))
-                time.sleep(0.005)
-            lgpio.gpio_free(h, CFG.GPIO_FLOW_METER)
+        readings = []
+        for _ in range(10):
+            readings.append(hw.flow._device.value)
+            time.sleep(0.005)
 
-            # A connected sensor with pull-up should hold stable HIGH (all 1s)
-            # or, if water is flowing, produce a mix of 0/1.  A floating
-            # unconnected pin reads erratically.
-            # We consider it "detected" if all readings are identical (stable).
-            return len(set(readings)) == 1
-        finally:
-            lgpio.gpiochip_close(h)
+        # A connected sensor with pull-up should hold stable (all same)
+        # or, if water is flowing, produce pulses (mix of 0/1).
+        # A floating unconnected pin reads erratically.
+        # Consider it "detected" if all readings are identical (stable).
+        return len(set(readings)) == 1
     except Exception as exc:
-        log.debug("Flow meter check failed (lgpio): %s", exc)
+        log.debug("Flow meter check failed: %s", exc)
         return False
 
 
@@ -228,29 +180,31 @@ DEVICE_REGISTRY: list[DeviceCheck] = [
     ),
     DeviceCheck(
         key="solenoid_relay",
-        name="Solenoid Valve (Relay)",
-        description="Controls the water inlet solenoid valve.",
+        name="Solenoid Valve (Modbus Relay CH1)",
+        description="Controls the water inlet solenoid valve via Modbus RTU.",
         check_fn=_check_solenoid_relay,
         troubleshoot=(
-            f"Connect the relay module signal pin to GPIO {CFG.GPIO_RELAY_SOLENOID} (BCM).\n"
-            f"Provide 5 V and GND to the relay module from the Pi.\n"
-            f"Verify the relay board jumper is set for the correct "
-            f"trigger level (active-{'low' if CFG.RELAY_ACTIVE_LOW else 'high'})."
+            f"Relay is on Modbus coil {CFG.MODBUS_CH_SOLENOID} "
+            f"(slave {CFG.MODBUS_SLAVE_ID}) via {CFG.MODBUS_SERIAL_PORT}.\n"
+            f"Check that the USB RS485 adapter is connected and the\n"
+            f"Waveshare relay board has power (5 V) and the RS485 A/B\n"
+            f"lines are wired correctly (A→A, B→B)."
         ),
-        pins=f"GPIO {CFG.GPIO_RELAY_SOLENOID}",
+        pins=f"Modbus coil {CFG.MODBUS_CH_SOLENOID} (USB RS485)",
     ),
     DeviceCheck(
         key="paddle_relay",
-        name="Mixing Paddle (Relay)",
-        description="Controls the AC mixing paddle motor.",
+        name="Mixing Paddle (Modbus Relay CH2)",
+        description="Controls the AC mixing paddle motor via Modbus RTU.",
         check_fn=_check_paddle_relay,
         troubleshoot=(
-            f"Connect the relay module signal pin to GPIO {CFG.GPIO_RELAY_PADDLE} (BCM).\n"
-            f"Provide 5 V and GND to the relay module from the Pi.\n"
-            f"Verify the relay board jumper is set for the correct "
-            f"trigger level (active-{'low' if CFG.RELAY_ACTIVE_LOW else 'high'})."
+            f"Relay is on Modbus coil {CFG.MODBUS_CH_PADDLE} "
+            f"(slave {CFG.MODBUS_SLAVE_ID}) via {CFG.MODBUS_SERIAL_PORT}.\n"
+            f"Check that the USB RS485 adapter is connected and the\n"
+            f"Waveshare relay board has power (5 V) and the RS485 A/B\n"
+            f"lines are wired correctly (A→A, B→B)."
         ),
-        pins=f"GPIO {CFG.GPIO_RELAY_PADDLE}",
+        pins=f"Modbus coil {CFG.MODBUS_CH_PADDLE} (USB RS485)",
     ),
     DeviceCheck(
         key="flow_meter",

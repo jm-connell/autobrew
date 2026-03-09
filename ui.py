@@ -137,13 +137,9 @@ class BrewApp:
 
         if use_fullscreen:
             try:
-                # overrideredirect bypasses the window manager entirely so the
-                # Pi taskbar (lxpanel / waybar) cannot sit on top of the window.
-                self.root.overrideredirect(True)
                 self.root.attributes("-fullscreen", True)
-                sw = self.root.winfo_screenwidth()
-                sh = self.root.winfo_screenheight()
-                self.root.geometry(f"{sw}x{sh}+0+0")
+                # -topmost keeps the Pi taskbar (lxpanel / waybar) behind.
+                self.root.attributes("-topmost", True)
             except tk.TclError:
                 use_fullscreen = False
 
@@ -159,6 +155,9 @@ class BrewApp:
         _apply_ui_metrics(w, h)
 
         self.root.bind("<Escape>", lambda e: self._quit())
+
+        # Track fullscreen state for messagebox workaround
+        self._fullscreen_active = use_fullscreen
 
         # Container frame for screen switching
         self._container = tk.Frame(self.root, bg=CFG.UI_BG_COLOR)
@@ -412,14 +411,15 @@ class BrewApp:
             dilution = float(self._ent_dilution.get())
             hours = float(self._ent_duration.get())
         except ValueError:
-            messagebox.showerror("Input Error", "Please enter valid numbers.")
+            self._msgbox(messagebox.showerror, "Input Error", "Please enter valid numbers.")
             return
 
         if fert <= 0 or dilution <= 0:
-            messagebox.showerror("Input Error", "Weight and dilution must be > 0.")
+            self._msgbox(messagebox.showerror, "Input Error", "Weight and dilution must be > 0.")
             return
         if not (CFG.BREW_MIN_HOURS <= hours <= CFG.BREW_MAX_HOURS):
-            messagebox.showerror(
+            self._msgbox(
+                messagebox.showerror,
                 "Input Error",
                 f"Duration must be {CFG.BREW_MIN_HOURS}–{CFG.BREW_MAX_HOURS} hours.",
             )
@@ -427,7 +427,8 @@ class BrewApp:
 
         target_gal = BrewController.calc_target_gallons(fert, dilution)
         if target_gal > CFG.TANK_CAPACITY_GALLONS and not self._skip_fill_var.get():
-            messagebox.showwarning(
+            self._msgbox(
+                messagebox.showwarning,
                 "Exceeds Tank",
                 f"Calculated {target_gal:.1f} gal exceeds tank capacity "
                 f"({CFG.TANK_CAPACITY_GALLONS} gal).\nAdjust inputs or skip fill.",
@@ -623,6 +624,16 @@ class BrewApp:
         # Alert banner
         alert = self.ctrl.alert_msg
         self._lbl_alert.config(text=alert if alert else "")
+
+        # --- Fill failsafe pause: show choice dialog ---
+        if (self.ctrl._fill_failsafe_event.is_set()
+                and not getattr(self, "_failsafe_dialog_active", False)):
+            self._failsafe_dialog_active = True
+            reason = self.ctrl._fill_failsafe_reason
+            choice = self._show_failsafe_dialog(reason)
+            self.ctrl._fill_failsafe_choice = choice
+            self.ctrl._fill_failsafe_response.set()
+            self._failsafe_dialog_active = False
 
         # Button states
         if phase == Phase.FILL.value:
@@ -1040,7 +1051,7 @@ class BrewApp:
     def _on_flow_run(self):
         # Safety: do not allow this while a brew cycle is running
         if self.ctrl.running and self.ctrl.state.get("phase") in (Phase.FILL.value, Phase.BREW.value):
-            messagebox.showwarning("Busy", "Stop the current cycle before calibrating.")
+            self._msgbox(messagebox.showwarning, "Busy", "Stop the current cycle before calibrating.")
             return
         self.hw.flow.reset()
         self._flow_pulses_start = 0
@@ -1094,14 +1105,14 @@ class BrewApp:
             full_cm = float(self._ent_full_cm.get())
             cap = float(self._ent_capacity.get())
         except ValueError:
-            messagebox.showerror("Calibration", "Please enter valid numbers.")
+            self._msgbox(messagebox.showerror, "Calibration", "Please enter valid numbers.")
             return
 
         if ppg <= 0:
-            messagebox.showerror("Calibration", "Flow calibration must be > 0.")
+            self._msgbox(messagebox.showerror, "Calibration", "Flow calibration must be > 0.")
             return
         if empty_cm <= full_cm:
-            messagebox.showerror("Calibration", "Empty distance must be greater than full distance.")
+            self._msgbox(messagebox.showerror, "Calibration", "Empty distance must be greater than full distance.")
             return
 
         self._settings["flow_pulses_per_gallon"] = ppg
@@ -1111,7 +1122,7 @@ class BrewApp:
         self._settings["calibration_complete"] = True
 
         if not save_settings(self._settings):
-            messagebox.showerror("Calibration", "Could not save settings file.")
+            self._msgbox(messagebox.showerror, "Calibration", "Could not save settings file.")
             return
 
         # Apply to runtime config + hardware instances
@@ -1119,7 +1130,7 @@ class BrewApp:
         self.hw.flow.set_pulses_per_gallon(ppg)
         self.hw.level.set_geometry(empty_cm, full_cm, cap)
 
-        messagebox.showinfo("Calibration", "Calibration saved.")
+        self._msgbox(messagebox.showinfo, "Calibration", "Calibration saved.")
 
         # Return to main flow
         if self._cal_first_time:
@@ -1143,7 +1154,8 @@ class BrewApp:
             pass
 
         if self._cal_first_time and not self._mock_mode:
-            messagebox.showwarning(
+            self._msgbox(
+                messagebox.showwarning,
                 "Setup Required",
                 "Calibration is required before using the system.",
             )
@@ -1157,6 +1169,105 @@ class BrewApp:
     # ------------------------------------------------------------------
     #  Utilities
     # ------------------------------------------------------------------
+    def _show_failsafe_dialog(self, reason: str) -> str:
+        """Modal 3-choice dialog for fill-phase level-sensor failsafe.
+
+        Returns "continue", "brew", or "cancel".
+        """
+        if self._fullscreen_active:
+            self.root.attributes("-topmost", False)
+            self.root.update_idletasks()
+
+        result = {"choice": "cancel"}   # safe default
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Fill Paused")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.configure(bg=CFG.UI_BG_COLOR)
+        dlg.resizable(False, False)
+
+        # Size and centre
+        dw, dh = _px(520), _px(280)
+        sx = self.root.winfo_screenwidth()
+        sy = self.root.winfo_screenheight()
+        dlg.geometry(f"{dw}x{dh}+{(sx - dw) // 2}+{(sy - dh) // 2}")
+
+        # Warning icon + reason
+        lbl_icon = tk.Label(dlg, text="⚠", bg=CFG.UI_BG_COLOR, fg=CFG.UI_WARN)
+        lbl_icon.config(font=(CFG.UI_FONT_FAMILY, _px(32)))
+        lbl_icon.pack(pady=(_px(14), 0))
+
+        lbl_msg = tk.Label(
+            dlg, text=reason, bg=CFG.UI_BG_COLOR, fg=CFG.UI_FG_COLOR,
+            wraplength=dw - _px(40), justify="center",
+        )
+        lbl_msg.config(font=FONT_MD)
+        lbl_msg.pack(pady=(_px(6), _px(4)))
+
+        lbl_q = tk.Label(
+            dlg, text="What would you like to do?",
+            bg=CFG.UI_BG_COLOR, fg=CFG.UI_FG_COLOR,
+        )
+        lbl_q.config(font=FONT_SM)
+        lbl_q.pack(pady=(_px(2), _px(10)))
+
+        # Buttons
+        btn_frame = tk.Frame(dlg, bg=CFG.UI_BG_COLOR)
+        btn_frame.pack(pady=_px(6))
+
+        def _choose(c: str):
+            result["choice"] = c
+            dlg.destroy()
+
+        btn_continue = tk.Button(
+            btn_frame, text="Ignore && Continue",
+            command=lambda: _choose("continue"),
+        )
+        _style_button(btn_continue)
+        btn_continue.config(bg=CFG.UI_ACCENT, fg="#000")
+        btn_continue.pack(side="left", padx=_px(6))
+
+        btn_brew = tk.Button(
+            btn_frame, text="Stop Fill → Brew",
+            command=lambda: _choose("brew"),
+        )
+        _style_button(btn_brew)
+        btn_brew.pack(side="left", padx=_px(6))
+
+        btn_cancel = tk.Button(
+            btn_frame, text="Cancel Cycle",
+            command=lambda: _choose("cancel"),
+        )
+        _style_button(btn_cancel)
+        btn_cancel.config(bg=CFG.UI_WARN, fg="#000")
+        btn_cancel.pack(side="left", padx=_px(6))
+
+        # Prevent closing with window-manager X
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        self.root.wait_window(dlg)
+
+        if self._fullscreen_active:
+            self.root.attributes("-topmost", True)
+
+        return result["choice"]
+
+    def _msgbox(self, fn, title, msg, **kw):
+        """Show a messagebox that works with fullscreen + topmost.
+
+        Temporarily drop -topmost so the dialog can appear on top,
+        then restore it afterwards.
+        """
+        if self._fullscreen_active:
+            self.root.attributes("-topmost", False)
+            self.root.update_idletasks()
+        try:
+            return fn(title, msg, parent=self.root, **kw)
+        finally:
+            if self._fullscreen_active:
+                self.root.attributes("-topmost", True)
+
     @staticmethod
     def _fmt_time(seconds: float) -> str:
         """Format seconds into H:MM:SS."""
