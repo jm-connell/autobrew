@@ -1126,13 +1126,19 @@ class BrewApp:
         ultra_box = tk.Frame(content_frame, bg=CFG.UI_ENTRY_BG)
         ultra_box.pack(fill="x", pady=_px(4))
 
-        lbl_ultra = tk.Label(ultra_box, text="Ultrasonic Tank Geometry")
+        # Title row with live sensor reading on the right
+        title_row = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
+        title_row.pack(fill="x", padx=PAD, pady=(_px(6), 0))
+        lbl_ultra = tk.Label(title_row, text="Ultrasonic Tank Geometry")
         lbl_ultra.config(font=FONT_MD, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
-        lbl_ultra.pack(anchor="w", padx=PAD, pady=(_px(6), 0))
+        lbl_ultra.pack(side="left")
+        self._lbl_ultra_live = tk.Label(title_row, text="Sensor: —", font=FONT_SM,
+                                        bg=CFG.UI_ENTRY_BG, fg=CFG.UI_ACCENT)
+        self._lbl_ultra_live.pack(side="right")
 
         ultra_hint = (
-            "Hold a flat target under the sensor at the desired distance and press\n"
-            "'Use current as EMPTY/FULL', or enter distances manually.\nNote: Acceptable range is ~20cm-500cm."
+            "Use buttons to capture sensor reading, or enter distances manually. "
+            "Range: 21–499 cm."
         )
         lbl_ultra_hint = tk.Label(ultra_box, text=ultra_hint, justify="left")
         lbl_ultra_hint.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
@@ -1186,6 +1192,18 @@ class BrewApp:
         if self._flow_running:
             pulses_now = self.hw.flow.pulse_count - self._flow_pulses_start
             self._lbl_flow_pulses.config(text=f"Pulses: {pulses_now}")
+        # Update the live ultrasonic reading
+        if hasattr(self, "_lbl_ultra_live"):
+            try:
+                dist = self.hw.level.read_distance_cm()
+                if dist is None:
+                    self._lbl_ultra_live.config(text="Sensor: No reading", fg=CFG.UI_WARN)
+                elif not (21 <= dist <= 499):
+                    self._lbl_ultra_live.config(text=f"Sensor: {dist:.1f} cm (out of range)", fg=CFG.UI_WARN)
+                else:
+                    self._lbl_ultra_live.config(text=f"Sensor: {dist:.1f} cm", fg=CFG.UI_ACCENT)
+            except Exception:
+                self._lbl_ultra_live.config(text="Sensor: Error", fg=CFG.UI_WARN)
         self.root.after(250, self._refresh_cal_pulses)
 
     def _on_flow_run(self):
@@ -1224,6 +1242,9 @@ class BrewApp:
         if dist is None:
             self._lbl_ultra_read.config(text="No reading", fg=CFG.UI_WARN)
             return
+        if not (21 <= dist <= 499):
+            self._lbl_ultra_read.config(text=f"Out of range: {dist:.1f} cm (21–499 cm)", fg=CFG.UI_WARN)
+            return
         self._ent_empty_cm.delete(0, tk.END)
         self._ent_empty_cm.insert(0, f"{dist:.1f}")
         self._lbl_ultra_read.config(text=f"Current: {dist:.1f} cm", fg=CFG.UI_ACCENT)
@@ -1232,6 +1253,9 @@ class BrewApp:
         dist = self.hw.level.read_distance_cm()
         if dist is None:
             self._lbl_ultra_read.config(text="No reading", fg=CFG.UI_WARN)
+            return
+        if not (21 <= dist <= 499):
+            self._lbl_ultra_read.config(text=f"Out of range: {dist:.1f} cm (21–499 cm)", fg=CFG.UI_WARN)
             return
         self._ent_full_cm.delete(0, tk.END)
         self._ent_full_cm.insert(0, f"{dist:.1f}")
@@ -1250,6 +1274,12 @@ class BrewApp:
 
         if ppg <= 0:
             self._msgbox(messagebox.showerror, "Calibration", "Flow calibration must be > 0.")
+            return
+        if not (21 <= empty_cm <= 499):
+            self._msgbox(messagebox.showerror, "Calibration", "Empty distance must be between 21 and 499 cm.")
+            return
+        if not (21 <= full_cm <= 499):
+            self._msgbox(messagebox.showerror, "Calibration", "Full distance must be between 21 and 499 cm.")
             return
         if empty_cm <= full_cm:
             self._msgbox(messagebox.showerror, "Calibration", "Empty distance must be greater than full distance.")
