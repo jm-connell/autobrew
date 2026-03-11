@@ -8,5 +8,8 @@
   "tank_full_distance_cm": 36.0,
   "tank_overfill_pct": 95.0,
   "level_sensor_failsafe_stop": true,
-  "relay_active_low": true
+  "relay_active_low": true,
+  "last_fertilizer_lb": 50.0,
+  "last_dilution_ratio": 10.0,
+  "last_brew_hours": 24.0
 }

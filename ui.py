@@ -322,6 +322,8 @@ class BrewApp:
     # ==================================================================
     def _show_setup_screen(self):
         self._clear_container()
+        # Reload settings so last-used brew values are available
+        self._settings = merge_with_defaults(load_settings())
         frm = tk.Frame(self._container, bg=CFG.UI_BG_COLOR)
         frm.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -337,8 +339,10 @@ class BrewApp:
 
         self._ent_fert = tk.Entry(frm)
         _style_entry(self._ent_fert)
-        self._ent_fert.insert(0, "50")
+        _fert_default = self._settings.get("last_fertilizer_lb")
+        self._ent_fert.insert(0, self._fmt_num(_fert_default) if _fert_default is not None else "50")
         self._ent_fert.grid(row=1, column=1, padx=PAD, pady=_px(6))
+        self._bind_numpad(self._ent_fert, "Fertilizer (lb)")
 
         # --- Dilution ratio ---
         lbl_dr = tk.Label(frm, text="Dilution (lb water / lb fert):")
@@ -347,8 +351,10 @@ class BrewApp:
 
         self._ent_dilution = tk.Entry(frm)
         _style_entry(self._ent_dilution)
-        self._ent_dilution.insert(0, str(CFG.DEFAULT_DILUTION_RATIO))
+        _dil_default = self._settings.get("last_dilution_ratio")
+        self._ent_dilution.insert(0, self._fmt_num(_dil_default) if _dil_default is not None else str(CFG.DEFAULT_DILUTION_RATIO))
         self._ent_dilution.grid(row=2, column=1, padx=PAD, pady=_px(6))
+        self._bind_numpad(self._ent_dilution, "Dilution Ratio")
 
         # Calculated gallons indicator
         self._lbl_calc_gal = tk.Label(frm, text="")
@@ -367,8 +373,10 @@ class BrewApp:
 
         self._ent_duration = tk.Entry(frm)
         _style_entry(self._ent_duration)
-        self._ent_duration.insert(0, "24")
+        _dur_default = self._settings.get("last_brew_hours")
+        self._ent_duration.insert(0, self._fmt_num(_dur_default) if _dur_default is not None else "24")
         self._ent_duration.grid(row=3, column=1, padx=PAD, pady=_px(6))
+        self._bind_numpad(self._ent_duration, "Brew Duration (hours)")
 
         # --- Skip fill checkbox ---
         self._skip_fill_var = tk.IntVar(value=0)
@@ -435,6 +443,12 @@ class BrewApp:
             )
             return
 
+        # Persist last-used brew inputs for next session
+        self._settings["last_fertilizer_lb"] = fert
+        self._settings["last_dilution_ratio"] = dilution
+        self._settings["last_brew_hours"] = hours
+        save_settings(self._settings)
+
         skip = bool(self._skip_fill_var.get())
         self.ctrl.start_cycle(fert, dilution, hours, skip)
         self._show_monitor_screen()
@@ -445,6 +459,8 @@ class BrewApp:
     def _show_monitor_screen(self):
         self._clear_container()
         self._complete_popup_shown = False
+        self._cycle_resumable = False
+        self._pre_stop_phase: str | None = None
         outer = tk.Frame(self._container, bg=CFG.UI_BG_COLOR)
         outer.pack(fill="both", expand=True, padx=PAD, pady=PAD)
 
@@ -516,9 +532,10 @@ class BrewApp:
         self._btn_end_fill.pack(side="left", padx=_px(6))
 
         self._btn_stop_cycle = tk.Button(
-            btn_row1, text="Stop Cycle", command=self._on_stop_cycle, state="disabled",
+            btn_row1, text="Stop Cycle", command=self._on_stop_cycle,
         )
         _style_button(self._btn_stop_cycle)
+        self._set_btn(self._btn_stop_cycle, False)
         self._btn_stop_cycle.pack(side="left", padx=_px(6))
 
         btn_stop = tk.Button(
@@ -532,15 +549,17 @@ class BrewApp:
         btn_row2.pack(pady=(_px(2), _px(4)))
 
         self._btn_new = tk.Button(
-            btn_row2, text="New Cycle", command=self._on_new_cycle, state="disabled",
+            btn_row2, text="New Cycle", command=self._on_new_cycle,
         )
         _style_button(self._btn_new)
+        self._set_btn(self._btn_new, False)
         self._btn_new.pack(side="left", padx=_px(6))
 
         self._btn_cal = tk.Button(
-            btn_row2, text="Calibration", command=lambda: self._show_calibration_screen(first_time=False), state="disabled",
+            btn_row2, text="Calibration", command=lambda: self._show_calibration_screen(first_time=False),
         )
         _style_button(self._btn_cal)
+        self._set_btn(self._btn_cal, False)
         self._btn_cal.pack(side="left", padx=_px(6))
 
         # Start periodic refresh
@@ -646,25 +665,47 @@ class BrewApp:
             return  # popup navigates to setup screen; stop refreshing
 
         # Button states
+        _b = self._set_btn
         if phase == Phase.FILL.value:
-            self._btn_end_fill.config(state="normal")
-            self._btn_new.config(state="disabled")
-            self._btn_stop_cycle.config(state="normal")
-            self._btn_cal.config(state="disabled")
+            _b(self._btn_end_fill,  True)
+            self._btn_end_fill.config(text="End Fill Now")
+            _b(self._btn_stop_cycle, True)
+            self._btn_stop_cycle.config(text="Stop Cycle")
+            _b(self._btn_new,       False)
+            _b(self._btn_cal,       False)
         elif phase == Phase.BREW.value:
-            self._btn_end_fill.config(state="disabled")
-            self._btn_new.config(state="disabled")
-            self._btn_stop_cycle.config(state="normal")
-            self._btn_cal.config(state="disabled")
+            _b(self._btn_end_fill,  False)
+            self._btn_end_fill.config(text="Fill Ended")
+            _b(self._btn_stop_cycle, True)
+            self._btn_stop_cycle.config(text="Stop Cycle")
+            _b(self._btn_new,       False)
+            _b(self._btn_cal,       False)
         else:
             # COMPLETE, STOPPED, ERROR, IDLE — cycle is not active
-            self._btn_end_fill.config(state="disabled")
-            self._btn_new.config(state="normal")
-            self._btn_stop_cycle.config(state="disabled")
-            self._btn_cal.config(state="normal")
+            _b(self._btn_end_fill,  False)
+            self._btn_end_fill.config(text="Fill Ended")
+            if self._cycle_resumable:
+                self._set_btn_resume(self._btn_stop_cycle)
+                self._btn_stop_cycle.config(text="\u25B6  Resume")
+            else:
+                _b(self._btn_stop_cycle, False)
+                self._btn_stop_cycle.config(text="Stopped")
+            _b(self._btn_new,       True)
+            _b(self._btn_cal,       True)
 
         # Schedule next refresh
         self.root.after(CFG.UI_REFRESH_INTERVAL_MS, self._refresh_monitor)
+
+    def _set_btn(self, btn: tk.Button, enabled: bool):
+        """Enable or disable a monitor button with distinct visual contrast."""
+        if enabled:
+            btn.config(state="normal", bg=CFG.UI_BUTTON_BG, fg=CFG.UI_FG_COLOR)
+        else:
+            btn.config(state="disabled", bg="#252535", fg="#565680")
+
+    def _set_btn_resume(self, btn: tk.Button):
+        """Style a monitor button as the amber 'Resume' action."""
+        btn.config(state="normal", bg="#f9e2af", fg="#1e1e2e")
 
     # ------------------------------------------------------------------
     def _bg_temp_read(self):
@@ -682,21 +723,47 @@ class BrewApp:
 
     def _on_emergency_stop(self):
         # Non-blocking so Tkinter never freezes on join
+        self._cycle_resumable = False
+        self._btn_stop_cycle.config(command=self._on_stop_cycle)
         self.ctrl.stop_async(emergency=True)
         clear_state()
         self.ctrl.state["phase"] = Phase.STOPPED.value
         self.ctrl.alert_msg = "Emergency stop activated. Cycle cancelled."
         self._stat_labels["phase"].config(text="STOPPED", fg=CFG.UI_WARN)
-        self._btn_new.config(state="normal")
+        self._btn_stop_cycle.config(text="Stopped")
+        self._btn_end_fill.config(text="Fill Ended")
+        self._set_btn(self._btn_new, True)
 
     def _on_stop_cycle(self):
-        # Normal (non-emergency) stop.
-        # If filling: closes solenoid. If brewing: stops paddle.
-        self.ctrl.stop_async(emergency=False, cancel_state=True)
-        clear_state()
-        self.ctrl.alert_msg = "Cycle stopped."
+        # Normal (non-emergency) stop — preserve in-memory state so the cycle
+        # can be resumed without restarting from scratch.
+        self._pre_stop_phase = self.ctrl.state.get("phase")
+        self.ctrl.stop_async(emergency=False, cancel_state=False)
+        clear_state()  # clear disk file; in-memory state is kept for resume
+        self.ctrl.alert_msg = "Cycle stopped.  Tap \u25B6 Resume to continue."
         self.ctrl.state["phase"] = Phase.STOPPED.value
-        self._btn_new.config(state="normal")
+        self._cycle_resumable = True
+        self._btn_stop_cycle.config(command=self._on_resume_cycle)
+        self._set_btn_resume(self._btn_stop_cycle)
+        self._btn_stop_cycle.config(text="\u25B6  Resume")
+        self._btn_end_fill.config(text="Fill Ended")
+        self._set_btn(self._btn_new, True)
+
+    def _on_resume_cycle(self):
+        """Resume a stopped cycle from its last saved in-memory state."""
+        self._cycle_resumable = False
+        self._btn_stop_cycle.config(command=self._on_stop_cycle)
+        # Restore the original phase so resume_cycle knows where to pick up
+        if self._pre_stop_phase:
+            self.ctrl.state["phase"] = self._pre_stop_phase
+        self.ctrl.resume_cycle(self.ctrl.state)
+        # _refresh_monitor will correct button states on the next tick
+        self._set_btn(self._btn_stop_cycle, False)
+        self._btn_stop_cycle.config(text="Stop Cycle")
+        self._btn_end_fill.config(text="End Fill Now")
+        self._set_btn(self._btn_new, False)
+        self._set_btn(self._btn_cal, False)
+        self.ctrl.alert_msg = ""
 
     def _on_new_cycle(self):
         clear_state()
@@ -1049,6 +1116,7 @@ class BrewApp:
         _style_entry(self._ent_flow_actual_gal)
         self._ent_flow_actual_gal.insert(0, "10")
         self._ent_flow_actual_gal.pack(side="left", padx=_px(6))
+        self._bind_numpad(self._ent_flow_actual_gal, "Actual Gallons")
 
         self._lbl_flow_result = tk.Label(row2, text="")
         self._lbl_flow_result.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_OK)
@@ -1078,18 +1146,21 @@ class BrewApp:
         _style_entry(self._ent_empty_cm)
         self._ent_empty_cm.insert(0, str(self._settings.get("tank_empty_distance_cm", CFG.TANK_EMPTY_DISTANCE_CM)))
         self._ent_empty_cm.pack(side="left", padx=_px(4))
+        self._bind_numpad(self._ent_empty_cm, "Empty Distance (cm)")
 
         tk.Label(urow, text="Full (cm):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
         self._ent_full_cm = tk.Entry(urow)
         _style_entry(self._ent_full_cm)
         self._ent_full_cm.insert(0, str(self._settings.get("tank_full_distance_cm", CFG.TANK_FULL_DISTANCE_CM)))
         self._ent_full_cm.pack(side="left", padx=_px(4))
+        self._bind_numpad(self._ent_full_cm, "Full Distance (cm)")
 
         tk.Label(urow, text="Capacity (gal):", font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR).pack(side="left")
         self._ent_capacity = tk.Entry(urow)
         _style_entry(self._ent_capacity)
         self._ent_capacity.insert(0, str(self._settings.get("tank_capacity_gallons", CFG.TANK_CAPACITY_GALLONS)))
         self._ent_capacity.pack(side="left", padx=_px(4))
+        self._bind_numpad(self._ent_capacity, "Tank Capacity (gal)")
 
         btns = tk.Frame(ultra_box, bg=CFG.UI_ENTRY_BG)
         btns.pack(fill="x", padx=PAD, pady=(0, _px(6)))
@@ -1236,6 +1307,171 @@ class BrewApp:
                 self._show_setup_screen()
 
     # ------------------------------------------------------------------
+    #  Numpad popup (on-screen keyboard for touchscreen entry fields)
+    # ------------------------------------------------------------------
+    def _show_numpad(self, entry: tk.Entry, title: str = "Enter Value"):
+        """Show a modal numpad popup. Replaces entry content on OK."""
+        if getattr(self, "_numpad_active", False):
+            return
+        # Guard: make sure the target entry still exists
+        try:
+            entry.winfo_exists()
+            entry.get()
+        except tk.TclError:
+            return
+
+        self._numpad_active = True
+
+        if self._fullscreen_active:
+            self.root.attributes("-topmost", False)
+            self.root.update_idletasks()
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.configure(bg=CFG.UI_BG_COLOR)
+        dlg.resizable(False, False)
+
+        # Size and centre
+        dw, dh = _px(280), _px(400)
+        sx = self.root.winfo_screenwidth()
+        sy = self.root.winfo_screenheight()
+        dlg.geometry(f"{dw}x{dh}+{(sx - dw) // 2}+{(sy - dh) // 2}")
+
+        current_val = tk.StringVar(value=entry.get())
+
+        # Title
+        tk.Label(
+            dlg, text=title, bg=CFG.UI_BG_COLOR, fg=CFG.UI_FG_COLOR,
+            font=FONT_MD,
+        ).pack(pady=(_px(8), _px(2)))
+
+        # Value display
+        tk.Label(
+            dlg, textvariable=current_val, bg=CFG.UI_ENTRY_BG,
+            fg=CFG.UI_FG_COLOR, font=FONT_STAT, anchor="e", padx=_px(10),
+        ).pack(fill="x", padx=_px(12), ipady=_px(4))
+
+        def _press(ch: str):
+            v = current_val.get()
+            if ch == "\u232b":
+                current_val.set(v[:-1])
+            elif ch == ".":
+                if "." not in v:
+                    current_val.set(v + ".")
+            else:
+                current_val.set(v + ch)
+
+        def _ok():
+            val = current_val.get()
+            try:
+                entry.delete(0, tk.END)
+                entry.insert(0, val)
+            except tk.TclError:
+                pass
+            _close()
+            # Trigger bindings attached to the entry (e.g. live calc update)
+            try:
+                entry.event_generate("<KeyRelease>")
+            except tk.TclError:
+                pass
+
+        def _close():
+            try:
+                dlg.destroy()
+            except tk.TclError:
+                pass
+            self._numpad_active = False
+            if self._fullscreen_active:
+                try:
+                    self.root.attributes("-topmost", True)
+                except tk.TclError:
+                    pass
+
+        # --- Digit grid ---
+        grid = tk.Frame(dlg, bg=CFG.UI_BG_COLOR)
+        grid.pack(fill="both", expand=True, padx=_px(12), pady=_px(4))
+
+        keys = [
+            ["7", "8", "9"],
+            ["4", "5", "6"],
+            ["1", "2", "3"],
+            [".", "0", "\u232b"],
+        ]
+        for r, row in enumerate(keys):
+            for c, ch in enumerate(row):
+                btn = tk.Button(
+                    grid, text=ch,
+                    font=(CFG.UI_FONT_FAMILY, _px(20), "bold"),
+                    bg=CFG.UI_BUTTON_BG, fg=CFG.UI_FG_COLOR,
+                    activebackground=CFG.UI_ACCENT, activeforeground="#000",
+                    relief="flat",
+                    command=lambda ch=ch: _press(ch),
+                )
+                btn.grid(
+                    row=r, column=c, sticky="nsew",
+                    padx=_px(3), pady=_px(3),
+                )
+        for c in range(3):
+            grid.columnconfigure(c, weight=1)
+        for r in range(4):
+            grid.rowconfigure(r, weight=1)
+
+        # --- Action buttons ---
+        actions = tk.Frame(dlg, bg=CFG.UI_BG_COLOR)
+        actions.pack(fill="x", padx=_px(12), pady=(_px(2), _px(8)))
+
+        btn_cancel = tk.Button(
+            actions, text="Cancel", command=_close,
+            font=FONT_MD, bg=CFG.UI_BUTTON_BG, fg=CFG.UI_FG_COLOR,
+            activebackground=CFG.UI_ACCENT, relief="flat",
+        )
+        btn_cancel.pack(side="left", fill="x", expand=True, padx=_px(3), ipady=_px(6))
+
+        btn_clear = tk.Button(
+            actions, text="Clear",
+            command=lambda: current_val.set(""),
+            font=FONT_MD, bg=CFG.UI_WARN, fg="#000",
+            activebackground="#e66a88", relief="flat",
+        )
+        btn_clear.pack(side="left", fill="x", expand=True, padx=_px(3), ipady=_px(6))
+
+        btn_ok = tk.Button(
+            actions, text="OK", command=_ok,
+            font=FONT_MD, bg=CFG.UI_OK, fg="#000",
+            activebackground="#8bc78a", relief="flat",
+        )
+        btn_ok.pack(side="left", fill="x", expand=True, padx=_px(3), ipady=_px(6))
+
+        dlg.protocol("WM_DELETE_WINDOW", _close)
+
+        # Force layout + wait for the window to be visible on screen
+        # BEFORE grabbing input — avoids blank dialog on X11/Pi.
+        dlg.update_idletasks()
+        try:
+            dlg.wait_visibility()
+        except tk.TclError:
+            pass
+        dlg.transient(self.root)
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+
+        try:
+            self.root.wait_window(dlg)
+        finally:
+            # Guarantee the flag is cleared no matter how the dialog exits
+            self._numpad_active = False
+
+    def _bind_numpad(self, entry: tk.Entry, title: str = "Enter Value"):
+        """Bind an Entry so tapping it opens the numpad popup."""
+        def _on_tap(event):
+            # Short delay so Tk focus/touch handling finishes first
+            self.root.after(80, lambda: self._show_numpad(entry, title))
+            return "break"  # prevent Entry class binding from stealing focus
+        entry.bind("<Button-1>", _on_tap)
+
+    # ------------------------------------------------------------------
     #  Utilities
     # ------------------------------------------------------------------
     def _show_failsafe_dialog(self, reason: str) -> str:
@@ -1344,3 +1580,12 @@ class BrewApp:
         h, rem = divmod(s, 3600)
         m, sec = divmod(rem, 60)
         return f"{h}:{m:02d}:{sec:02d}"
+
+    @staticmethod
+    def _fmt_num(v) -> str:
+        """Format a number for display: drop trailing .0 for whole numbers."""
+        try:
+            f = float(v)
+            return str(int(f)) if f == int(f) else str(f)
+        except (TypeError, ValueError):
+            return str(v)

@@ -35,6 +35,10 @@ def default_settings() -> dict:
         "level_sensor_failsafe_stop": CAL.LEVEL_SENSOR_FAILSAFE_STOP,
         # Relay polarity
         "relay_active_low": CAL.RELAY_ACTIVE_LOW,
+        # Last brew cycle inputs (remembered between sessions)
+        "last_fertilizer_lb": None,
+        "last_dilution_ratio": None,
+        "last_brew_hours": None,
     }
 
 
