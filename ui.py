@@ -1132,7 +1132,7 @@ class BrewApp:
 
         ultra_hint = (
             "Hold a flat target under the sensor at the desired distance and press\n"
-            "'Use current as EMPTY/FULL', or enter distances manually."
+            "'Use current as EMPTY/FULL', or enter distances manually.\nNote: Acceptable range is ~20cm-500cm."
         )
         lbl_ultra_hint = tk.Label(ultra_box, text=ultra_hint, justify="left")
         lbl_ultra_hint.config(font=FONT_SM, bg=CFG.UI_ENTRY_BG, fg=CFG.UI_FG_COLOR)
