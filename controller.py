@@ -53,6 +53,7 @@ class BrewController:
         self._fill_failsafe_response = threading.Event()   # UI sets → controller unblocks
         self._fill_failsafe_choice: str = ""               # "continue", "brew", or "cancel"
         self._fill_failsafe_reason: str = ""
+        self._level_failure_ignored: bool = False           # suppress repeat level-sensor popups
 
     # ------------------------------------------------------------------
     #  Calculation helpers
@@ -103,6 +104,7 @@ class BrewController:
         self._fill_failsafe_event.clear()
         self._fill_failsafe_response.clear()
         self._fill_failsafe_choice = ""
+        self._level_failure_ignored = False
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -129,6 +131,7 @@ class BrewController:
         self._fill_failsafe_event.clear()
         self._fill_failsafe_response.clear()
         self._fill_failsafe_choice = ""
+        self._level_failure_ignored = False
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -296,11 +299,12 @@ class BrewController:
 
             # Water level veto — emergency overfill protection
             level_pct = self.hw.level.read_level_pct()
-            if level_pct is None and CFG.LEVEL_SENSOR_FAILSAFE_STOP:
+            if level_pct is None and CFG.LEVEL_SENSOR_FAILSAFE_STOP and not self._level_failure_ignored:
                 choice = self._pause_fill_for_failsafe(
                     "Level sensor failure — no reading returned"
                 )
                 if choice == "continue":
+                    self._level_failure_ignored = True
                     continue
                 elif choice == "brew":
                     self.alert_msg = "⚠ Level sensor failure — fill stopped by user"

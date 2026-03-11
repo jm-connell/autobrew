@@ -444,6 +444,7 @@ class BrewApp:
     # ==================================================================
     def _show_monitor_screen(self):
         self._clear_container()
+        self._complete_popup_shown = False
         outer = tk.Frame(self._container, bg=CFG.UI_BG_COLOR)
         outer.pack(fill="both", expand=True, padx=PAD, pady=PAD)
 
@@ -504,40 +505,43 @@ class BrewApp:
         )
         self._progress.pack(pady=_px(8))
 
-        # --- Button row ---
-        btn_frame = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
-        btn_frame.pack(pady=_px(6))
+        # --- Button rows ---
+        btn_row1 = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
+        btn_row1.pack(pady=(_px(4), _px(2)))
 
         self._btn_end_fill = tk.Button(
-            btn_frame, text="End Fill Now", command=self._on_end_fill,
+            btn_row1, text="End Fill Now", command=self._on_end_fill,
         )
         _style_button(self._btn_end_fill)
-        self._btn_end_fill.pack(side="left", padx=_px(8))
+        self._btn_end_fill.pack(side="left", padx=_px(6))
+
+        self._btn_stop_cycle = tk.Button(
+            btn_row1, text="Stop Cycle", command=self._on_stop_cycle, state="disabled",
+        )
+        _style_button(self._btn_stop_cycle)
+        self._btn_stop_cycle.pack(side="left", padx=_px(6))
 
         btn_stop = tk.Button(
-            btn_frame, text="⛔  Emergency Stop", command=self._on_emergency_stop,
+            btn_row1, text="⛔ Emergency Stop", command=self._on_emergency_stop,
         )
         _style_button(btn_stop)
         btn_stop.config(bg=CFG.UI_WARN, fg="#000")
-        btn_stop.pack(side="left", padx=_px(8))
+        btn_stop.pack(side="left", padx=_px(6))
+
+        btn_row2 = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
+        btn_row2.pack(pady=(_px(2), _px(4)))
 
         self._btn_new = tk.Button(
-            btn_frame, text="New Cycle", command=self._on_new_cycle, state="disabled",
+            btn_row2, text="New Cycle", command=self._on_new_cycle, state="disabled",
         )
         _style_button(self._btn_new)
-        self._btn_new.pack(side="left", padx=_px(8))
-
-        self._btn_stop_cycle = tk.Button(
-            btn_frame, text="Stop Cycle", command=self._on_stop_cycle, state="disabled",
-        )
-        _style_button(self._btn_stop_cycle)
-        self._btn_stop_cycle.pack(side="left", padx=_px(8))
+        self._btn_new.pack(side="left", padx=_px(6))
 
         self._btn_cal = tk.Button(
-            btn_frame, text="Calibration", command=lambda: self._show_calibration_screen(first_time=False), state="disabled",
+            btn_row2, text="Calibration", command=lambda: self._show_calibration_screen(first_time=False), state="disabled",
         )
         _style_button(self._btn_cal)
-        self._btn_cal.pack(side="left", padx=_px(8))
+        self._btn_cal.pack(side="left", padx=_px(6))
 
         # Start periodic refresh
         self._refresh_monitor()
@@ -635,23 +639,29 @@ class BrewApp:
             self.ctrl._fill_failsafe_response.set()
             self._failsafe_dialog_active = False
 
+        # --- Cycle complete popup ---
+        if phase == Phase.COMPLETE.value and not self._complete_popup_shown:
+            self._complete_popup_shown = True
+            self._show_complete_popup()
+            return  # popup navigates to setup screen; stop refreshing
+
         # Button states
         if phase == Phase.FILL.value:
             self._btn_end_fill.config(state="normal")
             self._btn_new.config(state="disabled")
             self._btn_stop_cycle.config(state="normal")
             self._btn_cal.config(state="disabled")
-        elif phase == Phase.COMPLETE.value:
+        elif phase == Phase.BREW.value:
+            self._btn_end_fill.config(state="disabled")
+            self._btn_new.config(state="disabled")
+            self._btn_stop_cycle.config(state="normal")
+            self._btn_cal.config(state="disabled")
+        else:
+            # COMPLETE, STOPPED, ERROR, IDLE — cycle is not active
             self._btn_end_fill.config(state="disabled")
             self._btn_new.config(state="normal")
             self._btn_stop_cycle.config(state="disabled")
             self._btn_cal.config(state="normal")
-        else:
-            self._btn_end_fill.config(state="disabled")
-            self._btn_new.config(state="disabled")
-            self._btn_stop_cycle.config(state=("normal" if phase == Phase.BREW.value else "disabled"))
-            # Only allow calibration when not actively brewing
-            self._btn_cal.config(state=("normal" if phase in (Phase.IDLE.value, Phase.STOPPED.value) else "disabled"))
 
         # Schedule next refresh
         self.root.after(CFG.UI_REFRESH_INTERVAL_MS, self._refresh_monitor)
@@ -674,6 +684,7 @@ class BrewApp:
         # Non-blocking so Tkinter never freezes on join
         self.ctrl.stop_async(emergency=True)
         clear_state()
+        self.ctrl.state["phase"] = Phase.STOPPED.value
         self.ctrl.alert_msg = "Emergency stop activated. Cycle cancelled."
         self._stat_labels["phase"].config(text="STOPPED", fg=CFG.UI_WARN)
         self._btn_new.config(state="normal")
@@ -688,6 +699,57 @@ class BrewApp:
         self._btn_new.config(state="normal")
 
     def _on_new_cycle(self):
+        clear_state()
+        self.ctrl.state = new_state()
+        self._show_setup_screen()
+
+    # ------------------------------------------------------------------
+    #  Cycle Complete popup
+    # ------------------------------------------------------------------
+    def _show_complete_popup(self):
+        """Modal popup when the brew cycle finishes."""
+        if self._fullscreen_active:
+            self.root.attributes("-topmost", False)
+            self.root.update_idletasks()
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Cycle Complete")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.configure(bg=CFG.UI_BG_COLOR)
+        dlg.resizable(False, False)
+
+        dw, dh = _px(400), _px(220)
+        sx = self.root.winfo_screenwidth()
+        sy = self.root.winfo_screenheight()
+        dlg.geometry(f"{dw}x{dh}+{(sx - dw) // 2}+{(sy - dh) // 2}")
+
+        lbl_icon = tk.Label(dlg, text="\u2713", bg=CFG.UI_BG_COLOR, fg=CFG.UI_OK)
+        lbl_icon.config(font=(CFG.UI_FONT_FAMILY, _px(32)))
+        lbl_icon.pack(pady=(_px(18), 0))
+
+        lbl_msg = tk.Label(
+            dlg, text="Brew cycle complete!",
+            bg=CFG.UI_BG_COLOR, fg=CFG.UI_FG_COLOR,
+        )
+        lbl_msg.config(font=FONT_LG)
+        lbl_msg.pack(pady=(_px(10), _px(8)))
+
+        btn_ok = tk.Button(
+            dlg, text="OK",
+            command=dlg.destroy,
+        )
+        _style_button(btn_ok)
+        btn_ok.config(bg=CFG.UI_OK, fg="#000", font=FONT_LG)
+        btn_ok.pack(pady=_px(10), ipadx=_px(30))
+
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        self.root.wait_window(dlg)
+
+        if self._fullscreen_active:
+            self.root.attributes("-topmost", True)
+
+        # Return to the new-cycle setup screen
         clear_state()
         self.ctrl.state = new_state()
         self._show_setup_screen()
@@ -725,11 +787,11 @@ class BrewApp:
         footer = tk.Frame(outer, bg=CFG.UI_BG_COLOR)
         footer.pack(side="bottom", fill="x", pady=_px(6))
 
-        btn_recheck = tk.Button(
+        self._btn_hc_recheck = tk.Button(
             footer, text="\u27F3  Recheck All", command=self._hc_recheck,
         )
-        _style_button(btn_recheck)
-        btn_recheck.pack(side="left", padx=_px(8))
+        _style_button(self._btn_hc_recheck)
+        self._btn_hc_recheck.pack(side="left", padx=_px(8))
 
         btn_mock = tk.Button(
             footer, text="\u2699  Mock Mode",
@@ -783,8 +845,13 @@ class BrewApp:
         """Run all device checks and rebuild the result list."""
         from hardware_check import run_all_checks, DEVICE_REGISTRY, CheckResult
 
+        # Show loading indicator and disable button while checking
         for w in self._hc_list_frame.winfo_children():
             w.destroy()
+
+        self._hc_summary.config(text="\u23F3  Checking devices\u2026", fg=CFG.UI_ACCENT)
+        self._btn_hc_recheck.config(state="disabled", text="Checking\u2026")
+        self.root.update_idletasks()
 
         if self._mock_mode:
             results = [
@@ -808,6 +875,8 @@ class BrewApp:
 
         for result in results:
             self._hc_add_device_row(result)
+
+        self._btn_hc_recheck.config(state="normal", text="\u27F3  Recheck All")
 
     def _hc_add_device_row(self, result):
         """Add one device entry to the hardware-check list."""
@@ -1188,7 +1257,7 @@ class BrewApp:
         dlg.resizable(False, False)
 
         # Size and centre
-        dw, dh = _px(520), _px(280)
+        dw, dh = _px(560), _px(340)
         sx = self.root.winfo_screenwidth()
         sy = self.root.winfo_screenheight()
         dlg.geometry(f"{dw}x{dh}+{(sx - dw) // 2}+{(sy - dh) // 2}")
@@ -1212,28 +1281,28 @@ class BrewApp:
         lbl_q.config(font=FONT_SM)
         lbl_q.pack(pady=(_px(2), _px(10)))
 
-        # Buttons
+        # Buttons — stacked vertically for touch-friendliness
         btn_frame = tk.Frame(dlg, bg=CFG.UI_BG_COLOR)
-        btn_frame.pack(pady=_px(6))
+        btn_frame.pack(pady=_px(6), fill="x", padx=_px(60))
 
         def _choose(c: str):
             result["choice"] = c
             dlg.destroy()
 
         btn_continue = tk.Button(
-            btn_frame, text="Ignore && Continue",
+            btn_frame, text="Ignore & Continue",
             command=lambda: _choose("continue"),
         )
         _style_button(btn_continue)
         btn_continue.config(bg=CFG.UI_ACCENT, fg="#000")
-        btn_continue.pack(side="left", padx=_px(6))
+        btn_continue.pack(fill="x", pady=_px(4))
 
         btn_brew = tk.Button(
             btn_frame, text="Stop Fill → Brew",
             command=lambda: _choose("brew"),
         )
         _style_button(btn_brew)
-        btn_brew.pack(side="left", padx=_px(6))
+        btn_brew.pack(fill="x", pady=_px(4))
 
         btn_cancel = tk.Button(
             btn_frame, text="Cancel Cycle",
@@ -1241,7 +1310,7 @@ class BrewApp:
         )
         _style_button(btn_cancel)
         btn_cancel.config(bg=CFG.UI_WARN, fg="#000")
-        btn_cancel.pack(side="left", padx=_px(6))
+        btn_cancel.pack(fill="x", pady=_px(4))
 
         # Prevent closing with window-manager X
         dlg.protocol("WM_DELETE_WINDOW", lambda: None)
